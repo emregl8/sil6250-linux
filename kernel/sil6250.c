@@ -3,19 +3,14 @@
  * sil6250 - Silead SIL6250 fingerprint mailbox resource broker.
  *
  * Minimal ACPI platform driver for the SIL6250 sensor as wired on the Huawei
- * MateBook X Pro 2024 (ACPI HID "SIL6250").  The sensor is reached through an
- * EC-arbitrated shared-memory mailbox (ACPI _CRS Memory32Fixed) plus two GpioIo
+ * MateBook X Pro 2024 (ACPI HID "SIL6250"). The sensor is reached through an
+ * EC-arbitrated shared-memory mailbox (ACPI _CRS Memory32Fixed) + two GpioIo
  * strobe outputs and one GpioInt RX-ready doorbell.
  *
- * This driver intentionally contains NO protocol knowledge.  It only:
+ * This driver intentionally contains no protocol knowledge. It only:
  *   - binds the ACPI device and ioremaps the mailbox window,
  *   - resolves and claims the two GpioIo outputs + the GpioInt,
  *   - hands all three to userspace through /dev/sil6250 (mmap + 2 ioctls).
- *
- * The Petaic protocol (0xF0/0x5A framing, checksum, write_done/read_done strobe
- * sequencing, TLS-PSK secure channel) lives in the userspace petaic_ref driver.
- * The seam was chosen so the kernel footprint is the irreducible minimum: claim
- * an ACPI ID and expose four resources.
  */
 
 #include <linux/acpi.h>
@@ -37,7 +32,7 @@
 
 #include "sil6250_uapi.h"
 
-#define SIL6250_DRV_NAME	"sil6250"
+#define SIL6250_DRV_NAME "sil6250"
 #define SIL6250_WAIT_DEFAULT_MS	500
 
 struct sil6250 {
@@ -65,8 +60,7 @@ struct sil6250 {
  *
  * The _CRS lists one GpioInt (RX doorbell) and two GpioIo outputs (the strobes)
  * but does not name them, so we discover their resource indices and install an
- * ACPI driver-GPIO mapping to fetch them by name.  Lifted from the validated
- * gxfp_ref implementation.
+ * ACPI driver-GPIO mapping to fetch them by name.
  */
 struct sil6250_crs {
 	int gpio_seen;
@@ -210,7 +204,7 @@ static irqreturn_t sil6250_irq_thread(int irq, void *data)
 
 	/*
 	 * Level-high line: mask it now so it does not re-fire while userspace
-	 * processes the staged packet.  SIL6250_WAIT_IRQ re-arms (enable_irq)
+	 * processes the staged packet. SIL6250_WAIT_IRQ re-arms (enable_irq)
 	 * before the next wait.
 	 */
 	disable_irq_nosync(s->irq);
@@ -234,7 +228,7 @@ static long sil6250_wait_irq(struct sil6250 *s, u32 timeout_ms)
 		return rc;
 
 	reinit_completion(&s->rx_irq);
-	/* Re-arm the level line.  If the EC already staged a packet the line is
+	/* Re-arm the level line. If the EC already staged a packet the line is
 	 * high and the IRQ fires immediately; otherwise we wait for assertion. */
 	if (READ_ONCE(s->irq_masked)) {
 		WRITE_ONCE(s->irq_masked, false);
@@ -310,11 +304,9 @@ static int sil6250_mmap(struct file *file, struct vm_area_struct *vma)
 }
 
 /*
- * Access is gated by the /dev/sil6250 node permissions, not by an in-kernel
- * capability check: the exposed surface is narrow and device-scoped (mmap is
- * clamped to this device's own MMIO window, SET_GPIO drives only the two strobe
- * lines).  Ship 99-sil6250.rules so a normal desktop session can open it
- * without sudo; tighten the node's group/mode for a locked-down deployment.
+ * Access is gated by the /dev/sil6250 node permissions: the exposed surface is
+ * narrow and device-scoped (mmap is clamped to this device's own MMIO window,
+ * SET_GPIO drives only the two strobe lines).
  */
 static const struct file_operations sil6250_fops = {
 	.owner		= THIS_MODULE,

@@ -112,6 +112,4 @@ custom subsystem; deferred to keep the forked surface tiny.)
 
 ## License
 
-LGPL-2.1-or-later (see `LICENSE`), matching libfprint. The matcher is a
-clean-room reimplementation from patent-free primitives (SIFT patent expired
-~2020, Harris 1988, RANSAC 1981).
+LGPL-2.1 (see `LICENSE`).

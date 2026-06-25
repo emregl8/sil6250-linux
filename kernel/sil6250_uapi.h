@@ -7,16 +7,14 @@
  *
  * This module is deliberately a *resource broker*, not a protocol driver: it
  * claims the ACPI device (HID "SIL6250"), maps its mailbox window, and exposes
- * the two GpioIo strobe outputs and the GpioInt RX-ready doorbell.  All of the
- * Petaic protocol -- the 0xF0/0x5A framing, one's-complement checksum, the
- * write_done/read_done strobe sequencing and the TLS-PSK secure channel -- lives
- * entirely in userspace (see petaic_ref/).
+ * the two GpioIo strobe outputs and the GpioInt RX-ready doorbell. All of the
+ * Petaic protocol lives entirely in userspace.
  *
  * Transport primitives exposed on /dev/sil6250:
  *   - mmap()              maps the mailbox window (write region at +0x000, EC
- *                         response region at +0x200).  Access it with 64-bit
+ *                         response region at +0x200). Access it with 64-bit
  *                         aligned reads/writes, mirroring the firmware contract.
- *   - SIL6250_SET_GPIO    drive one of the two output strobes high/low.  The
+ *   - SIL6250_SET_GPIO    drive one of the two output strobes high/low. The
  *                         pulse *timing* (high/post-delay) is owned by userspace.
  *   - SIL6250_WAIT_IRQ    re-arm and block on the EC's RX-ready GpioInt (the
  *                         level line is masked after each fire and re-armed by
@@ -33,8 +31,8 @@
 #define SIL6250_LINE_READ_DONE	1	/* strobed after a response is consumed */
 
 struct sil6250_gpio {
-	__u32 line;	/* SIL6250_LINE_* */
-	__u32 value;	/* logical level: 0 = deassert, 1 = assert */
+	__u32 line;	        /* SIL6250_LINE_* */
+	__u32 value;	    /* logical level: 0 = deassert, 1 = assert */
 };
 
 struct sil6250_wait_irq {
