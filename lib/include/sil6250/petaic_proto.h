@@ -5,7 +5,7 @@
 /*
  * Petaic/SIL6250 mailbox frame builder + parser.
  *
- * De-kernelized port of gxfp_ref/proto/gxfp_petaic_proto.c.  Pure byte
+ * De-kernelized port of gxfp_ref/proto/gxfp_petaic_proto.c. Pure byte
  * manipulation, no hardware -- the userspace transport (petaic_transport.c)
  * feeds the built frames to the sil6250 mmap window.
  *
@@ -63,8 +63,8 @@ struct petaic_frame {
 uint32_t petaic_checksum(const uint8_t *buf, size_t len);
 
 /*
- * Generalized frame builder.  be32_field is written verbatim to the inner BE32
- * slot; min_region forces a minimum (zero-padded) payload region.  Returns the
+ * Generalized frame builder. be32_field is written verbatim to the inner BE32
+ * slot; min_region forces a minimum (zero-padded) payload region. Returns the
  * 8-byte-padded frame length, or a negative errno.
  */
 int petaic_build_frame_ex(uint8_t cmd, uint8_t dir, uint8_t access_width,

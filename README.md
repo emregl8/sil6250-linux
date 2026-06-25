@@ -110,6 +110,25 @@ custom subsystem; deferred to keep the forked surface tiny.)
 - `glib`, `gusb`, `gudev` — libfprint's own dependencies
 - `fprintd` + a PAM/desktop frontend for actual login use
 
+## How it was built
+
+The sensor is undocumented and has no public driver; this stack was produced by
+reverse engineering. The full story — hardware identification, the EC mailbox
+transport, the TLS-PSK channel, and the clean-room reimplementation of the
+match-on-host algorithm — is in **`REVERSE_ENGINEERING_DETAILS.md`**.
+
+## Credits
+
+- [**Void755/gxfp_linux_driver**](https://github.com/Void755/gxfp_linux_driver)
+  — the open-source GXFP5130 driver for the Goodix sibling sensor on the same
+  `\_SB.SPBA` ACPI node and `0xFE800000` mailbox window. Its working, ACK-getting
+  kernel code was the verified reference for the EC mailbox transport (the TX/RX
+  window split, the GPIO handshake strobes, and the EC arbitration model). See
+  `REVERSE_ENGINEERING_DETAILS.md` §3.2.
+- The [libfprint](https://gitlab.freedesktop.org/libfprint/libfprint) and
+  [fprintd](https://gitlab.freedesktop.org/libfprint/fprintd) projects, on which
+  the desktop integration is built.
+
 ## License
 
 LGPL-2.1 (see `LICENSE`).

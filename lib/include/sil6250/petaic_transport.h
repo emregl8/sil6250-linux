@@ -7,9 +7,9 @@
  *
  * This is the half that moved out of the kernel: it owns the whole
  *   shm_write -> strobe write_done -> wait_irq -> shm_read -> strobe read_done
- * transaction, the 0xF0/0x5A framing and the checksum.  The sil6250 module
+ * transaction, the 0xF0/0x5A framing and the checksum. The sil6250 module
  * provides only the raw window (mmap), the two strobe GPIOs and the RX-ready
- * IRQ.  Port of gxfp_ref/transport/gxfp_petaic.c.
+ * IRQ. Port of gxfp_ref/transport/gxfp_petaic.c.
  */
 
 #include <stddef.h>
@@ -45,7 +45,7 @@ int  petaic_shm_read(struct petaic_dev *d, uint8_t *buf, size_t len);
 /*
  * Standard command round-trip (cmd 0x1b/0x14/0x11 bring-up path): builds a
  * 27-byte frame, performs the transaction, extracts the win-style offset-7
- * OutputBuffer and verifies the checksum.  Returns 0 and fills out_rx_len, or a
+ * OutputBuffer and verifies the checksum. Returns 0 and fills out_rx_len, or a
  * negative errno.
  */
 int petaic_xfer(struct petaic_dev *d, uint8_t cmd, uint8_t dir, uint8_t width,
@@ -57,7 +57,7 @@ int petaic_xfer(struct petaic_dev *d, uint8_t cmd, uint8_t dir, uint8_t width,
  * Raw secure-channel round-trip (cmd 0x00 TLS records, 0x37/0x38 image): a dumb
  * pipe -- caller controls the full inner header + TX payload, and the raw RX
  * window (from +0x200) is returned with no offset-7 extraction or checksum
- * verify.  With PETAIC_XFER_READ_ONLY the TX frame is skipped and a continuation
+ * verify. With PETAIC_XFER_READ_ONLY the TX frame is skipped and a continuation
  * packet is pulled (wait_irq -> read -> strobe read_done).
  */
 int petaic_xfer_raw(struct petaic_dev *d, uint8_t cmd, uint8_t dir, uint8_t width,

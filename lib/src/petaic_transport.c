@@ -319,7 +319,7 @@ int petaic_xfer_raw(struct petaic_dev *d, uint8_t cmd, uint8_t dir, uint8_t widt
 			return rc;
 
 		/*
-		 * Primary response: wait for the EC's RX-ready IRQ.  useage-1
+		 * Primary response: wait for the EC's RX-ready IRQ. useage-1
 		 * ack commands (cmd 0x37) answer immediately in the same window
 		 * with no IRQ, so just settle instead of waiting (PETAIC_XFER_NO_IRQ).
 		 */

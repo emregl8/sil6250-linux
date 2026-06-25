@@ -2,20 +2,20 @@
 /*
  * petaic_tls - drive a TLS-PSK handshake with the SIL6250 sensor.
  *
- * The host is the TLS *server*; the sensor MCU is the client.  This harness
+ * The host is the TLS *server*; the sensor MCU is the client. This harness
  * stands up an mbedTLS PSK server, points its BIO at the userspace mailbox
- * transport (petaic_xfer_raw over /dev/sil6250), and runs the handshake.  It
+ * transport (petaic_xfer_raw over /dev/sil6250), and runs the handshake. It
  * confirms two things only live hardware can:
  *   1. the cmd-0x00 (write) / cmd-0x22 (read) record framing, and
  *   2. which of the 4 recovered PSK keys the sensor's 32-byte identity selects.
  *
  * Port of gxfp_ref/tools/petaic_tls.c: the kernel GXFP_IOCTL_PETAIC_RECORD
  * ioctl is replaced by petaic_xfer_raw(), which now builds the frame and drives
- * the strobe/wait/read dance in userspace (see petaic_transport.c).  All the
+ * the strobe/wait/read dance in userspace (see petaic_transport.c). All the
  * TLS / BIO / PSK / record-splitting logic below is unchanged.
  *
  * Framing decoded from petaic_decoded_trace.log (PETAIC_PROTOCOL.md §4a):
- *   write chunk (host->sensor):  cmd 0x00, dir 0x02
+ *   write chunk (host->sensor): cmd 0x00, dir 0x02
  *       inner: 5a 00 02 [datalen] 00 00 00 [data0] data1.. + 4 zero pad + cksum
  *       outer[1] = inner_len = datalen + 15
  *   read chunk (sensor->host):   cmd 0x22, dir 0x04 (pulled read-only)
@@ -88,7 +88,7 @@ static void msleep(int ms)
 }
 
 /*
- * One raw record round-trip.  Returns rx_len (>=0) or -errno.  Wraps
+ * One raw record round-trip. Returns rx_len (>=0) or -errno. Wraps
  * petaic_xfer_raw, which builds the 0x5A frame, writes the window, strobes
  * write_done, waits for the RX-ready IRQ, reads the raw window and strobes
  * read_done -- the whole transaction the kernel used to do.
@@ -118,7 +118,7 @@ static int sc_xfer(uint8_t cmd, uint8_t dir, uint8_t width, uint8_t outer,
 /*
  * Handshake prelude (PETAIC_PROTOCOL.md §5): right before
  * TLS_StartExchangeKeyThread the Windows driver issues cmd 0x20 (read 128 B)
- * then cmd 0x28 (read the 64-byte key-id blob).  cmd 0x28 kicks the sensor into
+ * then cmd 0x28 (read the 64-byte key-id blob). cmd 0x28 kicks the sensor into
  * key-exchange mode; after that we send a cmd-0x22 request and sc_read_chunk()
  * pulls the ClientHello stream.
  */
@@ -186,10 +186,10 @@ static int sc_write_chunk(const uint8_t *data, size_t datalen)
 }
 
 /*
- * Read one sensor->host continuation packet (read-only).  The transport waits
+ * Read one sensor->host continuation packet (read-only). The transport waits
  * for the EC's RX-ready IRQ, reads the raw window, then strobes read_done to
- * request the next packet.  Data is taken from window offset 7 (inner[3] reports
- * how many bytes the sensor delivered).  A leading 1-byte 0x5A marker
+ * request the next packet. Data is taken from window offset 7 (inner[3] reports
+ * how many bytes the sensor delivered). A leading 1-byte 0x5A marker
  * continuation is skipped transparently.
  */
 static int sc_read_chunk(uint8_t *out, size_t want)

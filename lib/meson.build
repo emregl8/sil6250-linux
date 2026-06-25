@@ -2,7 +2,7 @@
 #
 # This is the standalone library that owns everything above the kernel broker:
 # the mailbox framing, the TLS-PSK secure channel + capture engine, and the
-# host-side matcher.  The libfprint driver and the CLI tools are both thin
+# host-side matcher. The libfprint driver and the CLI tools are both thin
 # consumers of this library (see ../fprint-driver and ../tools).
 
 # Headers install under <prefix>/include/sil6250/ and are included flat
@@ -37,7 +37,7 @@ libsil6250 = library(
 
 install_headers(sil6250_headers, subdir: 'sil6250')
 
-# Public dependency for in-tree consumers (tools/).  External consumers (the
+# Public dependency for in-tree consumers (tools/). External consumers (the
 # libfprint driver) use the installed pkg-config file generated below.
 sil6250_dep = declare_dependency(
   link_with: libsil6250,

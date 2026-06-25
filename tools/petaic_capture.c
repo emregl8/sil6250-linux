@@ -2,7 +2,7 @@
 /*
  * petaic_capture - grab one fingerprint image from the SIL6250 sensor.
  *
- * This is step 5 of PETAIC_PROTOCOL.md: the post-handshake capture loop.  It
+ * This is step 5 of PETAIC_PROTOCOL.md: the post-handshake capture loop. It
  * stands up the same TLS-PSK session as petaic_tls (host = server), then:
  *
  *   1. cmd 0x37  RequestEncryptImageCmd  -> arms capture (useage-1 ack, no IRQ)
@@ -21,10 +21,10 @@
  *   0x38 rsp: 5a 38 05 [len_lo] [len_hi] 00 00 | 17 03 03 .. (TLS record @ off 7)
  *   2nd rsp:  pulled with cmd 0x0 useage 3, NO request frame (READ_ONLY).
  *
- * The two records decrypt to 3080 + 2044 = 5124 plaintext bytes.  Note the
+ * The two records decrypt to 3080 + 2044 = 5124 plaintext bytes. Note the
  * Windows driver additionally runs PetaicCryptSendEnimgKey (cmd 0x27) before
  * capture on a *keyed* unit; that is template/engine key provisioning, not the
- * TLS transport, and is not required to pull a raw image.  --sendkey is left as
+ * TLS transport, and is not required to pull a raw image. --sendkey is left as
  * a TODO hook if a unit turns out to NAK 0x37 without it.
  *
  * Build:  make petaic_capture   (links -lmbedtls -lmbedx509 -lmbedcrypto)
@@ -239,7 +239,7 @@ static int sc_read_chunk(uint8_t *out, size_t want)
 
 /*
  * Image phase: pull one bulk TLS record (17 03 03 ..) into g_rec.
- *   first record  (g_rec_idx==0): cmd 0x38 with a request frame, OutLength 3109
+ *   first record (g_rec_idx==0): cmd 0x38 with a request frame, OutLength 3109
  *   continuations (g_rec_idx>0) : cmd 0x0 useage 3, READ_ONLY (no request frame)
  * Both deliver the inner header 5a 38 05 [len_lo][len_hi] 00 00 then the TLS
  * record at window offset 7; the 16-bit LE length lives at inner[3..4].
@@ -258,7 +258,7 @@ static int img_pull_record(void)
 		/*
 		 * The first bulk read can come back as a cmd-0x37 status frame
 		 * (e.g. 5a 37 05 04 .. 01 04) while the sensor is still capturing
-		 * rather than a TLS record (17 03 03 ..).  Re-issue the 0x38
+		 * rather than a TLS record (17 03 03 ..). Re-issue the 0x38
 		 * request a few times until a real record appears.
 		 */
 		for (attempt = 0; attempt < IMG_BULK0_RETRIES; attempt++) {
@@ -266,7 +266,7 @@ static int img_pull_record(void)
 			 * Do NOT re-arm 0x37 here: a moving finger aborts the capture
 			 * and 0x38 just times out, but once records start flowing a
 			 * stray 0x37 read would swallow a 0x38 record (strobing its
-			 * read_done) and desync the GCM stream -> MAC failure.  A
+			 * read_done) and desync the GCM stream -> MAC failure. A
 			 * stuck capture is recovered at the top level by re-handshaking
 			 * on a fresh (uncorruptible) TLS session.
 			 */
@@ -295,7 +295,7 @@ static int img_pull_record(void)
 		 * The RX-ready GpioInt is LEVEL-triggered: after record N's read
 		 * the line can still be asserted until the sensor deasserts it
 		 * post-read_done, so a continuation wait_irq may fire immediately
-		 * and re-read the *same* window.  Let the line settle, then reject
+		 * and re-read the *same* window. Let the line settle, then reject
 		 * any window whose head matches the last accepted record.
 		 */
 		for (attempt = 0; attempt < IMG_CONT_RETRIES; attempt++) {
@@ -450,8 +450,8 @@ static void mbed_dbg(void *ctx, int level, const char *file, int line, const cha
 }
 
 /*
- * cmd 0x37 RequestEncryptImageCmd -> arms a capture.  useage-1 ack: the sensor
- * answers immediately in the same window (no IRQ), returning 5a 37 06 01 ..  aa.
+ * cmd 0x37 RequestEncryptImageCmd -> arms a capture. useage-1 ack: the sensor
+ * answers immediately in the same window (no IRQ), returning 5a 37 06 01 .. aa.
  */
 static int sc_request_image(void)
 {
@@ -471,10 +471,10 @@ static int sc_request_image(void)
 }
 
 /*
- * Poll cmd 0x11 (finger-detect) until a finger is present.  Standard frame
+ * Poll cmd 0x11 (finger-detect) until a finger is present. Standard frame
  * (dir 0x01, width 0x04, OutLength 1); the 1-byte status is 0x01 = finger down,
  * 0x00 = no finger (PETAIC_PROTOCOL.md §3, trace `read_data OutputBuffer: 01`).
- * Returns 1 on finger-down, 0 on timeout.  This replaces the level-IRQ
+ * Returns 1 on finger-down, 0 on timeout. This replaces the level-IRQ
  * wait_for_finger_down, which fires spuriously on a residual assertion.
  */
 static int poll_finger(unsigned timeout_ms)
@@ -559,7 +559,7 @@ static int capture_one(mbedtls_ssl_context *ssl, const char *out_path)
 			/*
 			 * img_pull_record already exhausts its own retry budget, so a
 			 * WANT_READ here means the capture genuinely failed (finger
-			 * moved / lifted).  Abort fast; the caller re-handshakes onto
+			 * moved / lifted). Abort fast; the caller re-handshakes onto
 			 * a clean session and tries again.
 			 */
 			fprintf(stderr, "[cap] capture failed at %zu/%d bytes (finger moved?)\n",
@@ -594,7 +594,7 @@ static int capture_one(mbedtls_ssl_context *ssl, const char *out_path)
 }
 
 /*
- * Build the per-frame output path.  For a single frame we use out_path as-is;
+ * Build the per-frame output path. For a single frame we use out_path as-is;
  * for a multi-frame run we insert the (zero-based) frame index before the file
  * extension, e.g. "fp.pgm" -> "fp_0.pgm", "fp_1.pgm", ...
  */
@@ -615,9 +615,9 @@ static void frame_path(char *buf, size_t buflen, const char *out_path, int idx)
 
 /*
  * Pull g_frames images through a single live TLS session, one 0x37->0x38
- * capture per frame, without re-handshaking.  This is the enroll/verify
+ * capture per frame, without re-handshaking. This is the enroll/verify
  * enabler (HANDOFF §5.1): Windows captures NumberOfImages frames on one
- * session.  g_frame_done persists across re-handshakes so a finger-moved
+ * session. g_frame_done persists across re-handshakes so a finger-moved
  * abort mid-sequence resumes from the next missing frame on a fresh session
  * rather than restarting the whole sequence.
  */
@@ -640,7 +640,7 @@ static int capture_session(mbedtls_ssl_context *ssl, const char *out_path)
 		if (g_frame_done < g_frames) {
 			/* Records are exactly consumed (5124 == 3080+2044), so the
 			 * TLS stream is at a clean record boundary -- just re-arm
-			 * 0x37 for the next frame.  A short settle lets the sensor
+			 * 0x37 for the next frame. A short settle lets the sensor
 			 * deassert RX-ready before the next finger poll. */
 			msleep(150);
 		}
@@ -777,7 +777,7 @@ int main(int argc, char **argv)
 
 		/* Retry on a fresh handshake: a moving finger aborts the capture
 		 * and a desynced stream kills the TLS session, but a new handshake
-		 * is always clean.  g_frame_done persists, so a re-handshake resumes
+		 * is always clean. g_frame_done persists, so a re-handshake resumes
 		 * from the next missing frame rather than restarting the sequence.
 		 * Wait long for the finger on the first try, briefly on retries. */
 		for (int a = 0; a < attempts; a++) {

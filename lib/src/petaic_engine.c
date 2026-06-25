@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * petaic_engine.c — reusable SIL6250 capture engine.  See petaic_engine.h.
+ * petaic_engine.c — reusable SIL6250 capture engine. See petaic_engine.h.
  *
  * This is petaic_capture.c's handshake + capture path, lifted out of file-static
  * globals into a per-engine context so it can back both the CLI and the
- * libfprint driver.  The protocol logic is unchanged; the comments there
+ * libfprint driver. The protocol logic is unchanged; the comments there
  * (PETAIC_PROTOCOL.md cross-refs, the level-IRQ dedup, the no-re-arm rule) still
  * apply and are kept where they earn their keep.
  */
@@ -191,11 +191,11 @@ static int sc_read_chunk(petaic_engine *e, uint8_t *out, size_t want)
 
 /*
  * Image phase: pull one bulk TLS record (17 03 03 ..) into e->rec.
- *   first record  (rec_idx==0): cmd 0x38 with a request frame, OutLength 3109
+ *   first record (rec_idx==0): cmd 0x38 with a request frame, OutLength 3109
  *   continuations (rec_idx>0) : cmd 0x0 useage 3, READ_ONLY (no request frame)
  * The level-triggered GpioInt can re-deliver the same window after a read, so
  * continuations settle then reject any window whose head matches the last
- * accepted record.  Never re-arm 0x37 mid-stream — a stray read swallows a 0x38
+ * accepted record. Never re-arm 0x37 mid-stream — a stray read swallows a 0x38
  * record and desyncs GCM; recover by re-handshaking, not re-arming.
  */
 static int img_pull_record(petaic_engine *e)
@@ -343,11 +343,11 @@ static void mbed_dbg(void *ctx, int level, const char *file, int line, const cha
 {
 	(void)ctx; (void)file; (void)line;
 	if (level <= 2)
-		fprintf(stderr, "  mbedtls[%d]: %s", level, str);
+		fprintf(stderr, " mbedtls[%d]: %s", level, str);
 }
 
 /*
- * cmd 0x37 RequestEncryptImageCmd -> arms a capture.  useage-1 ack (no IRQ),
+ * cmd 0x37 RequestEncryptImageCmd -> arms a capture. useage-1 ack (no IRQ),
  * the sensor answers immediately in the same window: 5a 37 06 01 .. aa.
  */
 static int sc_request_image(petaic_engine *e)
@@ -362,9 +362,9 @@ static int sc_request_image(petaic_engine *e)
 }
 
 /*
- * Poll cmd 0x11 (finger-detect) until a finger is present.  1-byte status:
- * 0x01 = down, 0x00 = up.  Replaces the level-IRQ wait (which fires spuriously
- * on a residual assertion).  Returns 1 on finger-down, 0 on timeout.
+ * Poll cmd 0x11 (finger-detect) until a finger is present. 1-byte status:
+ * 0x01 = down, 0x00 = up. Replaces the level-IRQ wait (which fires spuriously
+ * on a residual assertion). Returns 1 on finger-down, 0 on timeout.
  */
 static int poll_finger(petaic_engine *e, unsigned timeout_ms)
 {
@@ -385,12 +385,12 @@ static int poll_finger(petaic_engine *e, unsigned timeout_ms)
 }
 
 /*
- * Poll cmd 0x11 until the finger is lifted (status 0x00).  Mirror of
- * poll_finger: only a *confirmed* up reading counts.  A poll error / no-data
+ * Poll cmd 0x11 until the finger is lifted (status 0x00). Mirror of
+ * poll_finger: only a *confirmed* up reading counts. A poll error / no-data
  * (common on the first std poll right after a TLS image pull) must NOT be read
  * as "up" — doing so makes the lift-wait return instantly and the next capture
- * fires while the finger is still down (bursting near-identical frames).  So we
- * keep polling on error and return up only on st==0x00.  Returns 1 on up, 0 on
+ * fires while the finger is still down (bursting near-identical frames). So we
+ * keep polling on error and return up only on st==0x00. Returns 1 on up, 0 on
  * timeout (caller proceeds anyway; the diversity gate then drops the dup).
  */
 static int poll_finger_up(petaic_engine *e, unsigned timeout_ms)
@@ -607,7 +607,7 @@ int engine_capture_frame(petaic_engine *e, uint8_t img[IMG_SIZE], unsigned finge
 			return 0;
 
 		/* A desynced GCM stream is unrecoverable; drop the session so
-		 * the next attempt handshakes clean.  A pure finger-timeout on
+		 * the next attempt handshakes clean. A pure finger-timeout on
 		 * the first attempt is a real "no finger", not a desync. */
 		if (rc == -ETIMEDOUT && a == 0)
 			return -ETIMEDOUT;

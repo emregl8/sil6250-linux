@@ -45,7 +45,7 @@ index 538415a..fd90a6e 100644
 +    elif i == 'sil6250'
 +        # The SIL6250 driver is a thin FpDevice adapter over libsil6250, which
 +        # owns the mailbox protocol, the TLS-PSK capture engine, and the host
-+        # matcher.  Build and install it from the standalone sil6250-linux repo
++        # matcher. Build and install it from the standalone sil6250-linux repo
 +        # (its lib/) before configuring libfprint; it is found via pkg-config.
 +        sil6250_dep = dependency('libsil6250', version: '>= 0.1.0', required: false)
 +        if not sil6250_dep.found()

@@ -2,10 +2,10 @@
  * Petaic / Silead SIL6250 fingerprint driver (match-on-host)
  *
  * The SIL6250 (Huawei MateBook X Pro 2024) is a 64x80 touch sensor reached over
- * an EC-arbitrated shared-memory mailbox, not USB/SPI.  A companion kernel
+ * an EC-arbitrated shared-memory mailbox, not USB/SPI. A companion kernel
  * module (sil6250.ko) brokers the mailbox as /dev/sil6250; all protocol logic
  * (TLS-PSK secure channel, framing, the 0x11->0x37->0x38 capture loop) lives in
- * userspace in petaic_engine.  Matching also runs on the host — the sensor only
+ * userspace in petaic_engine. Matching also runs on the host — the sensor only
  * streams raw images — using a correlation matcher (petaic_match), because the
  * 3.2x4mm patch yields too few minutiae for the NBIS pipeline (see HANDOFF.md).
  *
@@ -14,9 +14,9 @@
  * frames in the FpPrint (FPI_PRINT_RAW), and score with best-shift NCC.
  *
  * Discovery: the mailbox device is neither hidraw nor spidev, so it is not
- * auto-discovered by libfprint's udev backend.  For now it registers as a
+ * auto-discovered by libfprint's udev backend. For now it registers as a
  * virtual-type device keyed on the FP_SIL6250 environment variable, whose value
- * is the device node path (e.g. FP_SIL6250=/dev/sil6250).  Proper udev discovery
+ * is the device node path (e.g. FP_SIL6250=/dev/sil6250). Proper udev discovery
  * is a later enhancement (needs the kernel module to expose a recognised node).
  *
  * The engine API is blocking; libfprint is single-threaded async on a GMainLoop.

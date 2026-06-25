@@ -1,5 +1,5 @@
 /* petaic_demo.c — end-to-end Track-A demo: engine capture + correlation matcher,
- * no libfprint.  Proves the enroll/verify pipeline the FpDevice driver will wrap.
+ * no libfprint. Proves the enroll/verify pipeline the FpDevice driver will wrap.
  *
  *   petaic_demo enroll --out finger.gal [--n 12] [--key shiba] [-v]
  *   petaic_demo verify --gal finger.gal [--thresh 0.30] [--key shiba] [-v]

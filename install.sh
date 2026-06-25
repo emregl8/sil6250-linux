@@ -117,7 +117,7 @@ stage_libfprint() {
   log "Configuring + building libfprint with the sil6250 driver"
   # Search both lib and lib64 pkgconfig dirs: get_libdir() can guess "lib64"
   # (e.g. when /usr/lib64 is a symlink) while meson installed the .pc under
-  # "lib".  Including both makes the lookup robust regardless of distro layout.
+  # "lib". Including both makes the lookup robust regardless of distro layout.
   local pcpath="$PREFIX/$(get_libdir)/pkgconfig:$PREFIX/lib/pkgconfig:$PREFIX/lib64/pkgconfig:${PKG_CONFIG_PATH:-}"
   PKG_CONFIG_PATH="$pcpath" \
     meson setup "$src/build" "$src" \
@@ -159,7 +159,7 @@ main() {
       *) die "unknown stage '$s' (lib|kernel|fprintd|libfprint)" ;;
     esac
   done
-  log "Done.  Enroll with:  fprintd-enroll    (or GNOME/KDE Settings)"
+  log "Done. Enroll with: fprintd-enroll (or GNOME/KDE Settings)"
 }
 
 main "$@"

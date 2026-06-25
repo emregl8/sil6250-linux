@@ -1,7 +1,7 @@
 # Grant the active local session read/write access to the SIL6250 mailbox
 # broker (/dev/sil6250) without sudo.
 #
-# TAG+="uaccess" makes systemd-logind add an ACL for the logged-in user.  This
+# TAG+="uaccess" makes systemd-logind add an ACL for the logged-in user. This
 # rule is numbered 60- (before 73-seat-late.rules, which applies the uaccess
 # ACL) so the tag is set in time; a 0660 root:users fallback covers non-logind
 # setups and system services such as fprintd.
