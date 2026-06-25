@@ -1,0 +1,23 @@
+# Meson build trees
+/build/
+/builddir/
+
+# Editor / language-server caches
+/.cache/
+compile_commands.json
+
+# libfprint checkout populated by install.sh when not used as a submodule
+# (remove this line if you register libfprint/ as a git submodule)
+/libfprint/
+
+# Kernel module build artifacts (when building kernel/ in place)
+kernel/*.o
+kernel/*.ko
+kernel/*.mod
+kernel/*.mod.c
+kernel/.*.cmd
+kernel/Module.symvers
+kernel/modules.order
+kernel/.tmp_versions/
+
+*.o
