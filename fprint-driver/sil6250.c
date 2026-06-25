@@ -280,7 +280,13 @@ capture_destriped (FpiDeviceSil6250 *self, pm_frame *out,
       int rc = engine_capture_frame (self->engine, raw, SIL6250_FINGER_MS);
       if (rc)
         {
-          g_set_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_GENERAL,
+          /* A capture miss (no finger, or a transient handshake/mailbox
+           * failure right after boot) is recoverable: a re-handshake on the
+           * next attempt usually succeeds. Report it in the retry domain so the
+           * caller re-prompts rather than aborting the operation, which would
+           * otherwise leave the fprintd claim dangling ("Device was already
+           * claimed"). See verify_done/identify_done. */
+          g_set_error (error, FP_DEVICE_RETRY, FP_DEVICE_RETRY_GENERAL,
                        "capture failed: %s", g_strerror (-rc));
           return FALSE;
         }
@@ -487,8 +493,19 @@ verify_done (GObject *source, GAsyncResult *res, gpointer user_data)
   (void) user_data;
   if (error)
     {
-      fpi_device_verify_report (dev, FPI_MATCH_ERROR, NULL, NULL);
-      fpi_device_verify_complete (dev, error);
+      /* Retry-domain errors are per-attempt: report them and complete with no
+       * error so fprintd re-prompts and releases the claim cleanly. Any other
+       * (hard) error must go through complete() ALONE — reporting AND completing
+       * with an error violates the libfprint contract and strands the claim. */
+      if (error->domain == FP_DEVICE_RETRY)
+        {
+          fpi_device_verify_report (dev, FPI_MATCH_ERROR, NULL, error);
+          fpi_device_verify_complete (dev, NULL);
+        }
+      else
+        {
+          fpi_device_verify_complete (dev, error);
+        }
       return;
     }
 
@@ -588,8 +605,17 @@ identify_done (GObject *source, GAsyncResult *res, gpointer user_data)
   (void) user_data;
   if (error)
     {
-      fpi_device_identify_report (dev, NULL, NULL, NULL);
-      fpi_device_identify_complete (dev, error);
+      /* See verify_done: retry-domain errors go through report() + a clean
+       * complete(); hard errors through complete() alone. */
+      if (error->domain == FP_DEVICE_RETRY)
+        {
+          fpi_device_identify_report (dev, NULL, NULL, error);
+          fpi_device_identify_complete (dev, NULL);
+        }
+      else
+        {
+          fpi_device_identify_complete (dev, error);
+        }
       return;
     }
 
