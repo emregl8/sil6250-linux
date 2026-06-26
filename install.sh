@@ -67,7 +67,19 @@ stage_kernel() {
   as_root udevadm control --reload
 
   log "Loading the module"
-  as_root modprobe sil6250 || warn "modprobe failed (no SIL6250 ACPI device here?)"
+  local mperr
+  if ! mperr="$(as_root modprobe sil6250 2>&1)"; then
+    if printf '%s' "$mperr" | grep -qiE 'key was rejected|required key not available'; then
+      warn "modprobe failed: the module signature was rejected under Secure Boot."
+      warn "Enroll the DKMS signing key, reboot, then re-run this stage:"
+      warn "    sudo mokutil --import /var/lib/dkms/mok.pub"
+    elif secure_boot_enabled; then
+      warn "modprobe failed under Secure Boot: ${mperr:-unknown error}"
+      warn "If this is a signing error, enroll the DKMS key: sudo mokutil --import /var/lib/dkms/mok.pub"
+    else
+      warn "modprobe failed (no SIL6250 ACPI device on this machine?): ${mperr:-unknown error}"
+    fi
+  fi
   as_root udevadm trigger -s misc || true
 }
 
@@ -136,6 +148,21 @@ stage_libfprint() {
   as_root ldconfig || true
 }
 
+# True when UEFI Secure Boot is enabled, in which case DKMS must sign the module
+# with a MOK key enrolled in the firmware or modprobe will reject it. Best-effort:
+# prefer mokutil, fall back to reading the SecureBoot efivar (last byte 1 = on).
+secure_boot_enabled() {
+  if command -v mokutil >/dev/null 2>&1; then
+    mokutil --sb-state 2>/dev/null | grep -qi enabled
+    return
+  fi
+  local var last
+  var="$(ls /sys/firmware/efi/efivars/SecureBoot-* 2>/dev/null | head -1)" || return 1
+  [ -n "$var" ] || return 1
+  last="$(od -An -tu1 "$var" 2>/dev/null | tr -s ' ' '\n' | grep -v '^$' | tail -1)"
+  [ "$last" = "1" ]
+}
+
 # Best-effort libdir name (Debian/Ubuntu use a multiarch triplet).
 get_libdir() {
   if command -v dpkg-architecture >/dev/null 2>&1; then
@@ -159,7 +186,19 @@ main() {
       *) die "unknown stage '$s' (lib|kernel|fprintd|libfprint)" ;;
     esac
   done
-  log "Done. Enroll with: fprintd-enroll (or GNOME/KDE Settings)"
+
+  # Enrollment only works once the whole stack is present: the virtual FpDevice
+  # is bound after BOTH the patched libfprint ('libfprint') and fprintd's drop-in
+  # ('fprintd') are installed. A subset run (e.g. just 'kernel') leaves
+  # fprintd-enroll failing with NoSuchDevice, so don't imply it's ready.
+  local ran=" ${stages[*]} "
+  if [[ "$ran" == *" fprintd "* && "$ran" == *" libfprint "* ]]; then
+    log "Done. Enroll with: fprintd-enroll (or GNOME/KDE Settings)"
+  else
+    warn "Partial install (ran:${stages[*]})."
+    warn "fprintd-enroll needs the full stack — the virtual device only binds after the"
+    warn "'fprintd' and 'libfprint' stages. Re-run ./install.sh with no arguments for everything."
+  fi
 }
 
 main "$@"
