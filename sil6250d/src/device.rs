@@ -7,7 +7,6 @@ use zbus::{interface, object_server::SignalEmitter};
 use crate::engine::{Engine, Features, Frame};
 use crate::storage;
 
-// Tuning constants — mirrors fprint-driver/sil6250.c.
 const ENROLL_STAGES: u32 = 12;
 const FINGER_MS: u32 = 15_000;
 const LIFT_MS: u32 = 4_000;
@@ -21,8 +20,6 @@ const SIFT_THRESHOLD: i32 = 5;
 const VERIFY_FRAMES: u32 = 3;
 
 pub const OBJECT_PATH: &str = "/io/github/uunicorn/Fprint/Device";
-
-// ---- shared state --------------------------------------------------------
 
 #[derive(Default)]
 struct State {
@@ -54,8 +51,6 @@ impl DeviceService {
         self.cancelled.store(true, Ordering::Relaxed);
     }
 }
-
-// ---- zbus interface ------------------------------------------------------
 
 #[interface(name = "io.github.uunicorn.Fprint.Device")]
 impl DeviceService {
@@ -107,26 +102,21 @@ impl DeviceService {
                 let emitter = emitter.clone();
                 let username = username.clone();
                 let finger_name = finger_name.clone();
-                move || {
-                    enroll_blocking(&devpath, &username, &finger_name, &cancelled, emitter)
-                }
+                move || enroll_blocking(&devpath, &username, &finger_name, &cancelled, emitter)
             })
             .await;
 
             match result {
                 Ok(Ok(())) => {
-                    let _ =
-                        DeviceService::enroll_status(&emitter, "enroll-completed", true).await;
+                    let _ = DeviceService::enroll_status(&emitter, "enroll-completed", true).await;
                 }
                 Ok(Err(e)) => {
                     tracing::error!("enroll error: {e}");
-                    let _ =
-                        DeviceService::enroll_status(&emitter, "enroll-failed", true).await;
+                    let _ = DeviceService::enroll_status(&emitter, "enroll-failed", true).await;
                 }
                 Err(e) => {
                     tracing::error!("enroll task panicked: {e}");
-                    let _ =
-                        DeviceService::enroll_status(&emitter, "enroll-failed", true).await;
+                    let _ = DeviceService::enroll_status(&emitter, "enroll-failed", true).await;
                 }
             }
         });
@@ -198,12 +188,8 @@ impl DeviceService {
     }
 
     async fn run_cmd(&self, _cmd: &str) -> zbus::fdo::Result<String> {
-        Err(zbus::fdo::Error::NotSupported(
-            "RunCmd not implemented".into(),
-        ))
+        Err(zbus::fdo::Error::NotSupported("RunCmd not implemented".into()))
     }
-
-    // ---- signals ---------------------------------------------------------
 
     #[zbus(signal)]
     async fn enroll_status(
@@ -226,8 +212,6 @@ impl DeviceService {
     ) -> zbus::Result<()>;
 }
 
-// ---- blocking worker: enroll ---------------------------------------------
-
 fn enroll_blocking(
     devpath: &str,
     username: &str,
@@ -235,7 +219,7 @@ fn enroll_blocking(
     cancelled: &AtomicBool,
     emitter: SignalEmitter<'_>,
 ) -> anyhow::Result<()> {
-    let engine = Engine::open(devpath)?;
+    let mut engine = Engine::open(devpath)?;
     let rt = tokio::runtime::Handle::current();
 
     let mut raw_kept: Vec<u8> = Vec::new();
@@ -248,9 +232,7 @@ fn enroll_blocking(
             anyhow::bail!("cancelled");
         }
 
-        let Some((frame, raw)) =
-            engine.capture(FINGER_MS, QUALITY_MIN, QUALITY_MAX_RETRY)
-        else {
+        let Some((frame, raw)) = engine.capture(FINGER_MS, QUALITY_MIN, QUALITY_MAX_RETRY) else {
             redundant += 1;
             if redundant >= ENROLL_MAX_REDUNDANT {
                 break;
@@ -258,9 +240,9 @@ fn enroll_blocking(
             continue;
         };
 
-        let too_similar = kept_frames.iter().any(|kept| {
-            frame.ncc_vs(kept, MAX_SHIFT, MIN_OVERLAP) > ENROLL_MAX_NCC
-        });
+        let too_similar = kept_frames
+            .iter()
+            .any(|kept| frame.ncc_vs(kept, MAX_SHIFT, MIN_OVERLAP) > ENROLL_MAX_NCC);
 
         if too_similar {
             redundant += 1;
@@ -273,8 +255,7 @@ fn enroll_blocking(
             got += 1;
             let em = emitter.clone();
             rt.block_on(async move {
-                let _ =
-                    DeviceService::enroll_status(&em, "enroll-stage-passed", false).await;
+                let _ = DeviceService::enroll_status(&em, "enroll-stage-passed", false).await;
             });
         }
 
@@ -291,8 +272,6 @@ fn enroll_blocking(
     Ok(())
 }
 
-// ---- blocking worker: verify ---------------------------------------------
-
 fn verify_blocking(
     devpath: &str,
     username: &str,
@@ -304,7 +283,7 @@ fn verify_blocking(
         anyhow::bail!("no enrolled data for {username}/{finger_name}");
     }
 
-    let engine = Engine::open(devpath)?;
+    let mut engine = Engine::open(devpath)?;
     let mut best = -1i32;
     let mut got_any = false;
 
@@ -312,8 +291,7 @@ fn verify_blocking(
         if cancelled.load(Ordering::Relaxed) {
             anyhow::bail!("cancelled");
         }
-        let Some((frame, _raw)) =
-            engine.capture(FINGER_MS, QUALITY_MIN, QUALITY_MAX_RETRY)
+        let Some((frame, _raw)) = engine.capture(FINGER_MS, QUALITY_MIN, QUALITY_MAX_RETRY)
         else {
             if !got_any {
                 anyhow::bail!("capture failed");

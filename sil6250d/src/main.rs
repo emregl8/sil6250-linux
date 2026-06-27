@@ -1,6 +1,5 @@
 mod device;
 mod engine;
-mod ffi;
 mod storage;
 
 use anyhow::Context;
@@ -71,10 +70,9 @@ async fn register_with_manager(conn: &zbus::Connection) -> anyhow::Result<()> {
 }
 
 async fn try_register(conn: &zbus::Connection) -> anyhow::Result<()> {
-    let manager =
-        zbus::Proxy::new(conn, MANAGER_DEST, MANAGER_PATH, MANAGER_IFACE)
-            .await
-            .context("create manager proxy")?;
+    let manager = zbus::Proxy::new(conn, MANAGER_DEST, MANAGER_PATH, MANAGER_IFACE)
+        .await
+        .context("create manager proxy")?;
 
     manager
         .call_method("RegisterDevice", &(OBJECT_PATH,))

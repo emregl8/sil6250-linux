@@ -1,19 +1,15 @@
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
-use crate::engine::{FRAME_BYTES, Features, Frame};
-use crate::ffi;
+use crate::engine::{Features, Frame, FRAME_BYTES};
 
 const STORAGE_DIR: &str = "/var/lib/open-fprintd/sil6250";
 
 fn finger_path(username: &str, finger: &str) -> PathBuf {
-    Path::new(STORAGE_DIR)
-        .join(username)
-        .join(finger)
-        .join("frames.bin")
+    Path::new(STORAGE_DIR).join(username).join(finger).join("frames.bin")
 }
 
-/// Persist `raw_frames` (flat array of FRAME_BYTES-byte frames) to disk.
+/// Persist raw frames (flat array of FRAME_BYTES-byte frames) to disk.
 pub fn save_frames(username: &str, finger: &str, raw_frames: &[u8]) -> io::Result<()> {
     assert_eq!(raw_frames.len() % FRAME_BYTES, 0);
     let path = finger_path(username, finger);
@@ -23,8 +19,7 @@ pub fn save_frames(username: &str, finger: &str, raw_frames: &[u8]) -> io::Resul
     Ok(())
 }
 
-/// Load all stored raw frames for `finger` and extract SIFT features.
-/// Returns an empty vec if nothing is stored.
+/// Load stored raw frames and extract SIFT features. Returns empty vec if nothing stored.
 pub fn load_features(username: &str, finger: &str) -> io::Result<Vec<Features>> {
     let path = finger_path(username, finger);
     let mut f = match std::fs::File::open(&path) {
@@ -38,12 +33,9 @@ pub fn load_features(username: &str, finger: &str) -> io::Result<Vec<Features>> 
     let n = buf.len() / FRAME_BYTES;
     let mut features = Vec::with_capacity(n);
     for i in 0..n {
-        let raw: &[u8; FRAME_BYTES] = buf[i * FRAME_BYTES..(i + 1) * FRAME_BYTES]
-            .try_into()
-            .unwrap();
-        let mut pm = Box::new(ffi::PmFrame { px: [0.0; ffi::PM_N] });
-        unsafe { ffi::pm_destripe(raw.as_ptr(), &raw mut *pm) };
-        let frame = Frame(pm);
+        let raw: &[u8; FRAME_BYTES] =
+            buf[i * FRAME_BYTES..(i + 1) * FRAME_BYTES].try_into().unwrap();
+        let frame = Frame::from_raw(raw);
         features.push(Features::extract(&frame));
     }
     Ok(features)

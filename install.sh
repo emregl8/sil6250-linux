@@ -80,18 +80,14 @@ stage_kernel() {
 }
 
 stage_daemon() {
-  local src="$HERE/open-fprintd-driver"
-  local pcpath="$PREFIX/$(get_libdir)/pkgconfig:$PREFIX/lib/pkgconfig:$PREFIX/lib64/pkgconfig:${PKG_CONFIG_PATH:-}"
-
   log "Building sil6250d (open-fprintd Rust backend)"
-  PKG_CONFIG_PATH="$pcpath" \
-    cargo build --release --manifest-path "$src/Cargo.toml"
+  cargo build --release --manifest-path "$HERE/Cargo.toml" -p sil6250d
 
   log "Installing sil6250d binary -> $PREFIX/bin/sil6250d"
-  as_root install -Dm755 "$src/target/release/sil6250d" "$PREFIX/bin/sil6250d"
+  as_root install -Dm755 "$HERE/target/release/sil6250d" "$PREFIX/bin/sil6250d"
 
   log "Installing D-Bus policy -> /etc/dbus-1/system.d/"
-  as_root install -Dm644 "$src/io.github.uunicorn.Fprint.conf" \
+  as_root install -Dm644 "$HERE/sil6250d/io.github.uunicorn.Fprint.conf" \
     /etc/dbus-1/system.d/io.github.uunicorn.Fprint.conf
 
   log "Installing systemd unit -> /etc/systemd/system/sil6250d.service"
@@ -99,7 +95,7 @@ stage_daemon() {
   local unit
   unit="$(mktemp)"
   sed "s|/usr/local/bin/sil6250d|$PREFIX/bin/sil6250d|" \
-    "$src/sil6250d.service" > "$unit"
+    "$HERE/sil6250d/sil6250d.service" > "$unit"
   as_root install -Dm644 "$unit" /etc/systemd/system/sil6250d.service
   rm -f "$unit"
 
