@@ -21,6 +21,14 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
+    // Harden file creation: all newly created files/directories are owner-only.
+    // This complements the explicit modes used in storage.rs.
+    unsafe {
+        libc::umask(0o077);
+    }
+
+    storage::init_storage().context("initialize enrollment storage directory")?;
+
     let devpath = std::env::var("SIL6250_DEV").unwrap_or_else(|_| "/dev/sil6250".into());
     tracing::info!(devpath, "starting sil6250d");
 

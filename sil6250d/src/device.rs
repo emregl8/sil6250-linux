@@ -222,7 +222,7 @@ fn enroll_blocking(
     let mut engine = Engine::open(devpath)?;
     let rt = tokio::runtime::Handle::current();
 
-    let mut raw_kept: Vec<u8> = Vec::new();
+    let mut kept_features: Vec<Features> = Vec::new();
     let mut kept_frames: Vec<Frame> = Vec::new();
     let mut got: u32 = 0;
     let mut redundant: u32 = 0;
@@ -232,7 +232,7 @@ fn enroll_blocking(
             anyhow::bail!("cancelled");
         }
 
-        let Some((frame, raw)) = engine.capture(FINGER_MS, QUALITY_MIN, QUALITY_MAX_RETRY) else {
+        let Some((frame, _raw)) = engine.capture(FINGER_MS, QUALITY_MIN, QUALITY_MAX_RETRY) else {
             redundant += 1;
             if redundant >= ENROLL_MAX_REDUNDANT {
                 break;
@@ -250,7 +250,7 @@ fn enroll_blocking(
                 break;
             }
         } else {
-            raw_kept.extend_from_slice(raw.as_ref());
+            kept_features.push(Features::extract(&frame));
             kept_frames.push(frame);
             got += 1;
             let em = emitter.clone();
@@ -268,7 +268,7 @@ fn enroll_blocking(
         anyhow::bail!("captured too few frames ({got})");
     }
 
-    storage::save_frames(username, finger_name, &raw_kept)?;
+    storage::save_features(username, finger_name, &kept_features)?;
     Ok(())
 }
 

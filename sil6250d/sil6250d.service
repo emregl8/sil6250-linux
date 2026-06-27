@@ -11,6 +11,8 @@ Type=dbus
 BusName=io.github.uunicorn.Fprint
 ExecStart=/usr/local/bin/sil6250d
 Environment=SIL6250_DEV=/dev/sil6250
+User=root
+Group=root
 # /dev/sil6250 is a misc char device not on fprintd's default DeviceAllow list.
 DeviceAllow=/dev/sil6250 rw
 Restart=on-failure

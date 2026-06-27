@@ -2,8 +2,6 @@ use std::io;
 
 pub use sil6250::{engine::IMG_SIZE, Features, Frame};
 
-pub const FRAME_BYTES: usize = sil6250::matcher::PM_N;
-
 pub struct Engine(sil6250::Engine);
 
 // SAFETY: Engine is used from spawn_blocking (single thread at a time).

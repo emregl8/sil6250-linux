@@ -36,6 +36,85 @@ impl Features {
     fn new() -> Self {
         Features { kp: Vec::new() }
     }
+
+    /// Serialize features to a compact binary representation.
+    ///
+    /// Format:
+    ///   - magic: b"SILF" (4 bytes)
+    ///   - version: 1 (1 byte)
+    ///   - reserved: 3 zero bytes
+    ///   - keypoint count as u32 LE (4 bytes)
+    ///   - keypoint data: x, y, scale, ori, resp (5 x f32 LE) + desc (128 x f32 LE)
+    pub fn serialize(&self) -> Vec<u8> {
+        const KP_BYTES: usize = 5 * 4 + DESC_DIM * 4;
+        let mut out = Vec::with_capacity(12 + self.kp.len() * KP_BYTES);
+        out.extend_from_slice(b"SILF");
+        out.push(1u8); // version
+        out.extend_from_slice(&[0u8; 3]);
+        out.extend_from_slice(&(self.kp.len() as u32).to_le_bytes());
+        for kp in &self.kp {
+            out.extend_from_slice(&kp.x.to_le_bytes());
+            out.extend_from_slice(&kp.y.to_le_bytes());
+            out.extend_from_slice(&kp.scale.to_le_bytes());
+            out.extend_from_slice(&kp.ori.to_le_bytes());
+            out.extend_from_slice(&kp.resp.to_le_bytes());
+            for &d in &kp.desc {
+                out.extend_from_slice(&d.to_le_bytes());
+            }
+        }
+        out
+    }
+
+    /// Deserialize features from `bytes`. Returns `None` if the data is malformed
+    /// or the format version is unsupported.
+    pub fn deserialize(bytes: &[u8]) -> Option<Self> {
+        const KP_BYTES: usize = 5 * 4 + DESC_DIM * 4;
+        if bytes.len() < 12 {
+            return None;
+        }
+        if &bytes[0..4] != b"SILF" {
+            return None;
+        }
+        if bytes[4] != 1 {
+            return None;
+        }
+        let n = u32::from_le_bytes(bytes[8..12].try_into().ok()?) as usize;
+        if n > MAX_KPTS {
+            return None;
+        }
+        if bytes.len() != 12 + n * KP_BYTES {
+            return None;
+        }
+
+        let mut kp = Vec::with_capacity(n);
+        let mut off = 12;
+        for _ in 0..n {
+            let x = f32::from_le_bytes(bytes[off..off + 4].try_into().ok()?);
+            off += 4;
+            let y = f32::from_le_bytes(bytes[off..off + 4].try_into().ok()?);
+            off += 4;
+            let scale = f32::from_le_bytes(bytes[off..off + 4].try_into().ok()?);
+            off += 4;
+            let ori = f32::from_le_bytes(bytes[off..off + 4].try_into().ok()?);
+            off += 4;
+            let resp = f32::from_le_bytes(bytes[off..off + 4].try_into().ok()?);
+            off += 4;
+            let mut desc = [0.0f32; DESC_DIM];
+            for i in 0..DESC_DIM {
+                desc[i] = f32::from_le_bytes(bytes[off..off + 4].try_into().ok()?);
+                off += 4;
+            }
+            kp.push(Keypoint {
+                x,
+                y,
+                scale,
+                ori,
+                resp,
+                desc,
+            });
+        }
+        Some(Features { kp })
+    }
 }
 
 // ---- Gaussian blur (zero-clamped border) -----------------------------------
