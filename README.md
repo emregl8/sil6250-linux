@@ -3,7 +3,7 @@
 A complete Linux stack for the **Silead SIL6250 / Petaic** match-on-host
 fingerprint sensor (as found in the Huawei MateBook X Pro 2024), so it works
 with the normal desktop fingerprint experience: enrol in GNOME/KDE Settings, log
-in and `sudo` with your finger via `fprintd` / PAM.
+in and `sudo` with your finger via PAM.
 
 The sensor is unusual: it is a 64×80 touch reader reached over an
 **EC-arbitrated shared-memory mailbox**, not USB or SPI, behind a TLS-PSK secure
@@ -15,23 +15,23 @@ reimplementation built from reverse engineering.
 ```
   GNOME/KDE Settings, PAM (sudo/login)
             │  D-Bus
-          fprintd
-            │
-        libfprint ── drivers/sil6250/sil6250.c   ← thin FpDevice adapter
-            │                  │ links
-            │            ┌─────┴───────────────────────────────┐
-            │            │  libsil6250  (this repo, lib/)       │
-            │            │  • mailbox framing  (petaic_proto)   │
-            │            │  • TLS-PSK + capture (petaic_engine) │
-            │            │  • host matcher   (petaic_match/sift)│
-            │            └─────┬───────────────────────────────┘
-            │                  │ /dev/sil6250  (mmap + ioctl)
-            │            sil6250.ko  (this repo, kernel/)   ← resource broker
-            │                  │ ACPI platform device "SIL6250"
-        hardware ─────────────┘  EC mailbox window + GPIO strobes + IRQ
+          open-fprintd
+            │  io.github.uunicorn.Fprint.Device
+          sil6250d  (this repo, open-fprintd-driver/)   ← standalone Rust daemon
+            │ links
+      ┌─────┴───────────────────────────────┐
+      │  libsil6250  (this repo, lib/)       │
+      │  • mailbox framing  (petaic_proto)   │
+      │  • TLS-PSK + capture (petaic_engine) │
+      │  • host matcher   (petaic_match/sift)│
+      └─────┬───────────────────────────────┘
+            │ /dev/sil6250  (mmap + ioctl)
+      sil6250.ko  (this repo, kernel/)   ← resource broker
+            │ ACPI platform device "SIL6250"
+    hardware   EC mailbox window + GPIO strobes + IRQ
 ```
 
-The design keeps each layer as thin as it can be:
+Each layer is as thin as possible:
 
 - **`kernel/` — `sil6250.ko`**: a minimal ACPI platform driver with *no
   protocol logic*. It ioremaps the mailbox window and exposes it as
@@ -41,35 +41,38 @@ The design keeps each layer as thin as it can be:
   host-side matcher (the sensor only streams raw images; the 3.2×4 mm patch is
   too small for the NBIS minutiae pipeline). Independently buildable and
   testable; the matcher is a patent-free clean-room reimplementation.
-- **`fprint-driver/` — the libfprint driver**: a small `FpDevice` adapter that
-  links `libsil6250`. libfprint has no out-of-tree driver ABI, so it ships as an
-  *overlay* (one source file + a patch) applied to a pinned upstream libfprint.
+- **`open-fprintd-driver/` — `sil6250d`**: a Rust daemon that implements the
+  `io.github.uunicorn.Fprint.Device` D-Bus interface and registers with
+  [open-fprintd](https://github.com/uunicorn/open-fprintd). Enrol/verify/identify
+  run as async D-Bus calls; the blocking libsil6250 work runs on a thread pool.
+  Enrolled prints are stored in `/var/lib/open-fprintd/sil6250/`.
 
 ## Layout
 
 ```
-kernel/          ACPI mailbox broker (sil6250.ko), UAPI header, udev rule, DKMS
-lib/             libsil6250 — userspace core (meson library + headers + pkg-config)
-tools/           CLI utilities: capture, TLS smoke test, offline matcher ROC
-fprint-driver/   libfprint FpDevice driver + overlay patch + fprintd drop-in
-libfprint/       upstream libfprint (git submodule; populated by install.sh)
-install.sh       orchestrates build + install of all four layers
+kernel/                ACPI mailbox broker (sil6250.ko), UAPI header, udev rule, DKMS
+lib/                   libsil6250 — userspace core (meson library + headers + pkg-config)
+tools/                 CLI utilities: capture, TLS smoke test, offline matcher ROC
+open-fprintd-driver/   sil6250d — Rust open-fprintd backend daemon
+install.sh             orchestrates build + install of all three layers
 ```
 
 ## Quick start
 
+Install [open-fprintd](https://github.com/uunicorn/open-fprintd) first (your
+distro may package it), then:
+
 ```sh
-# build + install everything (libsil6250, kernel module, fprintd glue, libfprint)
+# build + install everything (libsil6250, kernel module, sil6250d daemon)
 ./install.sh
 
-# then enrol
+# enrol
 fprintd-enroll          # or use GNOME/KDE Settings
 ```
 
-`install.sh` runs four stages — `lib`, `kernel`, `fprintd`, `libfprint` — and
-you can run any subset, e.g. `./install.sh lib kernel`. It uses `sudo` only for
-the steps that install system-wide. Override the install prefix with
-`PREFIX=/usr` and the libfprint version with `LIBFPRINT_REF=...`.
+`install.sh` runs three stages — `lib`, `kernel`, `daemon` — and you can run
+any subset, e.g. `./install.sh lib kernel`. It uses `sudo` only for steps that
+install system-wide. Override the install prefix with `PREFIX=/usr`.
 
 ## Building components by hand
 
@@ -83,32 +86,25 @@ sudo make -C kernel modules_install && sudo depmod -a
 sudo install -Dm644 kernel/60-sil6250.rules /etc/udev/rules.d/60-sil6250.rules
 sudo udevadm control --reload && sudo modprobe sil6250
 
-# libfprint driver overlay (against the pinned submodule)
-git submodule update --init libfprint
-install -Dm644 fprint-driver/sil6250.c libfprint/libfprint/drivers/sil6250/sil6250.c
-git -C libfprint apply ../fprint-driver/libfprint.patch
-meson setup libfprint/build libfprint -Ddrivers=default   # finds libsil6250 via pkg-config
-sudo meson install -C libfprint/build
+# sil6250d daemon
+PKG_CONFIG_PATH=/usr/local/lib/pkgconfig \
+  cargo build --release --manifest-path open-fprintd-driver/Cargo.toml
+sudo install -Dm755 open-fprintd-driver/target/release/sil6250d /usr/local/bin/sil6250d
+sudo install -Dm644 open-fprintd-driver/io.github.uunicorn.Fprint.conf \
+  /etc/dbus-1/system.d/io.github.uunicorn.Fprint.conf
+sudo install -Dm644 open-fprintd-driver/sil6250d.service \
+  /etc/systemd/system/sil6250d.service
+sudo systemctl daemon-reload && sudo systemctl enable --now sil6250d
 ```
-
-## Discovery
-
-The mailbox `/dev/sil6250` is neither `hidraw` nor `spidev`, so libfprint's udev
-backend cannot enumerate it. The driver therefore registers as a **virtual-type
-device** keyed on the `FP_SIL6250` environment variable, whose value is the
-device-node path. `fprint-driver/fprintd-sil6250.conf` is a systemd drop-in that
-exports `FP_SIL6250=/dev/sil6250` into the `fprintd` service environment, so the
-device is bound automatically whenever fprintd is activated — no manual step at
-login. (Full udev auto-discovery would require patching libfprint core to scan a
-custom subsystem; deferred to keep the forked surface tiny.)
 
 ## Requirements
 
 - A kernel with headers (DKMS or `make` against `/lib/modules/$(uname -r)/build`)
 - `meson`, `ninja`, a C compiler
 - `mbedtls` (`mbedtls`, `mbedx509`, `mbedcrypto`) — the TLS-PSK secure channel
-- `glib`, `gusb`, `gudev` — libfprint's own dependencies
-- `fprintd` + a PAM/desktop frontend for actual login use
+- `cargo` / Rust toolchain — for `sil6250d`
+- [open-fprintd](https://github.com/uunicorn/open-fprintd) — the fprintd replacement
+- A PAM/desktop frontend (`fprintd-enroll`, GNOME/KDE Settings) for actual login use
 
 ## How it was built
 
@@ -125,9 +121,9 @@ match-on-host algorithm — is in **`REVERSE_ENGINEERING_DETAILS.md`**.
   kernel code was the verified reference for the EC mailbox transport (the TX/RX
   window split, the GPIO handshake strobes, and the EC arbitration model). See
   `REVERSE_ENGINEERING_DETAILS.md` §3.2.
-- The [libfprint](https://gitlab.freedesktop.org/libfprint/libfprint) and
-  [fprintd](https://gitlab.freedesktop.org/libfprint/fprintd) projects, on which
-  the desktop integration is built.
+- [**uunicorn/open-fprintd**](https://github.com/uunicorn/open-fprintd) — the
+  fprintd-compatible daemon that accepts out-of-tree device backends over D-Bus,
+  making a standalone driver possible without patching libfprint.
 
 ## License
 

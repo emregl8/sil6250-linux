@@ -2,10 +2,9 @@
 #
 # Build and install the full SIL6250 fingerprint stack:
 #
-#   lib       libsil6250 (userspace core)      -> meson, installed via pkg-config
-#   kernel    sil6250.ko broker + udev rule    -> DKMS (or plain make)
-#   fprintd   FP_SIL6250 systemd drop-in        -> auto-binds the virtual device
-#   libfprint the FpDevice driver overlay        -> patched upstream checkout
+#   lib     libsil6250 (userspace core)   -> meson, installed via pkg-config
+#   kernel  sil6250.ko broker + udev rule -> DKMS (or plain make)
+#   daemon  sil6250d open-fprintd backend -> cargo, systemd unit, D-Bus policy
 #
 # Stages run in the order above.  Pass stage names to run a subset, e.g.
 #
@@ -13,16 +12,13 @@
 #   ./install.sh                   # everything
 #
 # Environment:
-#   PREFIX        install prefix for libsil6250 + libfprint (default /usr/local)
-#   LIBFPRINT_REF git ref of libfprint to build against (default pinned below)
-#   LLVM          forwarded to the kernel Makefile (set LLVM= for a gcc kernel)
+#   PREFIX  install prefix for libsil6250 + sil6250d binary (default /usr/local)
+#   LLVM    forwarded to the kernel Makefile (set LLVM= for a gcc kernel)
 
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PREFIX="${PREFIX:-/usr/local}"
-LIBFPRINT_URL="https://gitlab.freedesktop.org/libfprint/libfprint.git"
-LIBFPRINT_REF="${LIBFPRINT_REF:-a25f71cf97820c51edc4c32f84686fcdc608d9d1}"
 
 log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m!!\033[0m %s\n' "$*" >&2; }
@@ -83,69 +79,33 @@ stage_kernel() {
   as_root udevadm trigger -s misc || true
 }
 
-stage_fprintd() {
-  log "Installing fprintd FP_SIL6250 drop-in (auto-binds the virtual device)"
-  # Generate the drop-in so LD_LIBRARY_PATH matches the actual install prefix:
-  # the distro fprintd links the system libfprint (no sil6250 driver), so we
-  # must point it at our patched build under PREFIX.  Include both lib and lib64
-  # so the layout guess in get_libdir() can't strand the loader.
-  local conf
-  conf="$(mktemp)"
-  {
-    sed '/^Environment=LD_LIBRARY_PATH=/d' "$HERE/fprint-driver/fprintd-sil6250.conf"
-    printf 'Environment=LD_LIBRARY_PATH=%s/%s:%s/lib:%s/lib64\n' \
-      "$PREFIX" "$(get_libdir)" "$PREFIX" "$PREFIX"
-  } > "$conf"
-  as_root install -Dm644 "$conf" \
-    /etc/systemd/system/fprintd.service.d/10-sil6250.conf
-  rm -f "$conf"
-  as_root systemctl daemon-reload
-  as_root systemctl try-restart fprintd 2>/dev/null || true
-}
-
-stage_libfprint() {
-  local src="$HERE/libfprint"
-  if [ ! -e "$src/meson.build" ]; then
-    log "Fetching libfprint @ ${LIBFPRINT_REF:0:12}"
-    if [ -d "$HERE/.git" ] && git -C "$HERE" submodule status libfprint >/dev/null 2>&1; then
-      git -C "$HERE" submodule update --init libfprint
-    else
-      git clone "$LIBFPRINT_URL" "$src"
-    fi
-  fi
-  git -C "$src" fetch --depth 1 origin "$LIBFPRINT_REF" 2>/dev/null || true
-  git -C "$src" checkout -q "$LIBFPRINT_REF"
-
-  log "Applying the sil6250 driver overlay"
-  install -Dm644 "$HERE/fprint-driver/sil6250.c" \
-    "$src/libfprint/drivers/sil6250/sil6250.c"
-  # Idempotent: skip if the patch is already in place.
-  if git -C "$src" apply --reverse --check "$HERE/fprint-driver/libfprint.patch" 2>/dev/null; then
-    warn "overlay patch already applied; skipping"
-  else
-    git -C "$src" apply "$HERE/fprint-driver/libfprint.patch"
-  fi
-
-  log "Configuring + building libfprint with the sil6250 driver"
-  # Search both lib and lib64 pkgconfig dirs: get_libdir() can guess "lib64"
-  # (e.g. when /usr/lib64 is a symlink) while meson installed the .pc under
-  # "lib". Including both makes the lookup robust regardless of distro layout.
+stage_daemon() {
+  local src="$HERE/open-fprintd-driver"
   local pcpath="$PREFIX/$(get_libdir)/pkgconfig:$PREFIX/lib/pkgconfig:$PREFIX/lib64/pkgconfig:${PKG_CONFIG_PATH:-}"
+
+  log "Building sil6250d (open-fprintd Rust backend)"
   PKG_CONFIG_PATH="$pcpath" \
-    meson setup "$src/build" "$src" \
-      --prefix "$PREFIX" \
-      -Ddrivers=default \
-      -Dintrospection=false -Ddoc=false -Dgtk-examples=false \
-      --reconfigure 2>/dev/null \
-  || PKG_CONFIG_PATH="$pcpath" \
-    meson setup "$src/build" "$src" \
-      --prefix "$PREFIX" \
-      -Ddrivers=default \
-      -Dintrospection=false -Ddoc=false -Dgtk-examples=false
-  meson compile -C "$src/build"
-  log "Installing libfprint"
-  as_root meson install -C "$src/build"
-  as_root ldconfig || true
+    cargo build --release --manifest-path "$src/Cargo.toml"
+
+  log "Installing sil6250d binary -> $PREFIX/bin/sil6250d"
+  as_root install -Dm755 "$src/target/release/sil6250d" "$PREFIX/bin/sil6250d"
+
+  log "Installing D-Bus policy -> /etc/dbus-1/system.d/"
+  as_root install -Dm644 "$src/io.github.uunicorn.Fprint.conf" \
+    /etc/dbus-1/system.d/io.github.uunicorn.Fprint.conf
+
+  log "Installing systemd unit -> /etc/systemd/system/sil6250d.service"
+  # Patch the ExecStart path to match the chosen PREFIX.
+  local unit
+  unit="$(mktemp)"
+  sed "s|/usr/local/bin/sil6250d|$PREFIX/bin/sil6250d|" \
+    "$src/sil6250d.service" > "$unit"
+  as_root install -Dm644 "$unit" /etc/systemd/system/sil6250d.service
+  rm -f "$unit"
+
+  as_root systemctl daemon-reload
+  as_root systemctl enable sil6250d
+  as_root systemctl restart sil6250d || true
 }
 
 # True when UEFI Secure Boot is enabled, in which case DKMS must sign the module
@@ -176,14 +136,13 @@ get_libdir() {
 
 main() {
   local stages=("$@")
-  [ ${#stages[@]} -eq 0 ] && stages=(lib kernel fprintd libfprint)
+  [ ${#stages[@]} -eq 0 ] && stages=(lib kernel daemon)
   for s in "${stages[@]}"; do
     case "$s" in
-      lib)       stage_lib ;;
-      kernel)    stage_kernel ;;
-      fprintd)   stage_fprintd ;;
-      libfprint) stage_libfprint ;;
-      *) die "unknown stage '$s' (lib|kernel|fprintd|libfprint)" ;;
+      lib)    stage_lib ;;
+      kernel) stage_kernel ;;
+      daemon) stage_daemon ;;
+      *) die "unknown stage '$s' (lib|kernel|daemon)" ;;
     esac
   done
 
