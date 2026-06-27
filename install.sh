@@ -1,18 +1,17 @@
 #!/usr/bin/env bash
 #
-# Build and install the full SIL6250 fingerprint stack:
+# Build and install the SIL6250 fingerprint stack:
 #
-#   lib     libsil6250 (userspace core)   -> meson, installed via pkg-config
 #   kernel  sil6250.ko broker + udev rule -> DKMS (or plain make)
 #   daemon  sil6250d open-fprintd backend -> cargo, systemd unit, D-Bus policy
 #
 # Stages run in the order above.  Pass stage names to run a subset, e.g.
 #
-#   ./install.sh lib kernel        # just the library and the kernel module
-#   ./install.sh                   # everything
+#   ./install.sh kernel        # just the kernel module
+#   ./install.sh               # everything
 #
 # Environment:
-#   PREFIX  install prefix for libsil6250 + sil6250d binary (default /usr/local)
+#   PREFIX  install prefix for sil6250d binary (default /usr/local)
 #   LLVM    forwarded to the kernel Makefile (set LLVM= for a gcc kernel)
 
 set -euo pipefail
@@ -24,20 +23,8 @@ log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m!!\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31mxx\033[0m %s\n' "$*" >&2; exit 1; }
 
-# Run a command with sudo only when we are not already root.
 as_root() {
   if [ "$(id -u)" -eq 0 ]; then "$@"; else sudo "$@"; fi
-}
-
-stage_lib() {
-  log "Building libsil6250 (prefix=$PREFIX)"
-  meson setup "$HERE/build" "$HERE" \
-    --prefix "$PREFIX" --reconfigure 2>/dev/null \
-    || meson setup "$HERE/build" "$HERE" --prefix "$PREFIX"
-  meson compile -C "$HERE/build"
-  log "Installing libsil6250"
-  as_root meson install -C "$HERE/build"
-  as_root ldconfig || true
 }
 
 stage_kernel() {
@@ -52,7 +39,7 @@ stage_kernel() {
     as_root dkms install "sil6250/${ver}" --force
   else
     warn "dkms not found; building out-of-tree (won't survive kernel upgrades)"
-    make -C "$HERE/kernel"
+    make -C "$HERE/kernel" ${LLVM+LLVM="$LLVM"}
     as_root make -C "$HERE/kernel" modules_install
     as_root depmod -a
   fi
@@ -91,7 +78,6 @@ stage_daemon() {
     /etc/dbus-1/system.d/io.github.uunicorn.Fprint.conf
 
   log "Installing systemd unit -> /etc/systemd/system/sil6250d.service"
-  # Patch the ExecStart path to match the chosen PREFIX.
   local unit
   unit="$(mktemp)"
   sed "s|/usr/local/bin/sil6250d|$PREFIX/bin/sil6250d|" \
@@ -119,26 +105,15 @@ secure_boot_enabled() {
   [ "$last" = "1" ]
 }
 
-# Best-effort libdir name (Debian/Ubuntu use a multiarch triplet).
-get_libdir() {
-  if command -v dpkg-architecture >/dev/null 2>&1; then
-    echo "lib/$(dpkg-architecture -qDEB_HOST_MULTIARCH)"
-  elif [ -d /usr/lib64 ]; then
-    echo "lib64"
-  else
-    echo "lib"
-  fi
-}
 
 main() {
   local stages=("$@")
-  [ ${#stages[@]} -eq 0 ] && stages=(lib kernel daemon)
+  [ ${#stages[@]} -eq 0 ] && stages=(kernel daemon)
   for s in "${stages[@]}"; do
     case "$s" in
-      lib)    stage_lib ;;
       kernel) stage_kernel ;;
       daemon) stage_daemon ;;
-      *) die "unknown stage '$s' (lib|kernel|daemon)" ;;
+      *) die "unknown stage '$s' (kernel|daemon)" ;;
     esac
   done
 

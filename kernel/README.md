@@ -1,8 +1,8 @@
 # sil6250.ko — ACPI mailbox broker
 
-A minimal Linux platform driver for the SIL6250 fingerprint sensor. It is a pure
-**resource broker with no protocol logic**: all framing, crypto, and matching
-live in userspace (`../lib`, `libsil6250`).
+A minimal Linux platform driver for the SIL6250 fingerprint sensor. It is a
+pure **resource broker with no protocol logic**: all framing, crypto, and
+matching live in userspace (`../sil6250`, the Rust library crate).
 
 It binds ACPI HID `SIL6250`, ioremaps the EC mailbox window, and claims the two
 GpioIo strobe lines plus the GpioInt. It exposes `/dev/sil6250`:
@@ -12,7 +12,7 @@ GpioIo strobe lines plus the GpioInt. It exposes `/dev/sil6250`:
 - `ioctl SIL6250_WAIT_IRQ {timeout_ms}` — re-arms the masked level line and blocks
 - `ioctl SIL6250_GET_WINDOW_SIZE`
 
-The userspace↔kernel ABI is `sil6250_uapi.h` (consumed by `libsil6250`).
+The userspace↔kernel ABI is `sil6250_uapi.h` (consumed by the `sil6250` crate).
 
 ## Build
 
@@ -37,4 +37,4 @@ sudo dkms install sil6250/0.1.0
 
 Install `60-sil6250.rules` to `/etc/udev/rules.d/` for non-root access to
 `/dev/sil6250` (uaccess ACL for the active session + a `root:users` 0660
-fallback for system services like fprintd).
+fallback for system services like sil6250d).
