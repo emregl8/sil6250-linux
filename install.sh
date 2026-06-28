@@ -67,6 +67,15 @@ stage_kernel() {
 }
 
 stage_daemon() {
+  # sil6250d is useless without open-fprintd: it registers the device with the
+  # open-fprintd manager over D-Bus. Without it the daemon starts but silently
+  # waits forever for the manager, and fprintd-enroll finds no device.
+  if ! systemctl cat open-fprintd.service >/dev/null 2>&1; then
+    warn "open-fprintd does not appear to be installed (no open-fprintd.service)."
+    warn "sil6250d registers with open-fprintd over D-Bus; without it fprintd-enroll"
+    warn "will find no device. Install open-fprintd first (see README), then re-run."
+  fi
+
   log "Building sil6250d (open-fprintd Rust backend)"
   cargo build --release --manifest-path "$HERE/Cargo.toml" -p sil6250d
 
@@ -76,6 +85,14 @@ stage_daemon() {
   log "Installing D-Bus policy -> /etc/dbus-1/system.d/"
   as_root install -Dm644 "$HERE/sil6250d/io.github.uunicorn.Fprint.conf" \
     /etc/dbus-1/system.d/io.github.uunicorn.Fprint.conf
+
+  # The bus must re-read its config before sil6250d may own its name; without
+  # this the daemon's first start fails with "Request to own name refused by
+  # policy" until the next dbus reload/reboot.
+  log "Reloading D-Bus to apply the new policy"
+  as_root systemctl reload dbus 2>/dev/null \
+    || as_root systemctl reload dbus-broker 2>/dev/null \
+    || warn "could not reload dbus; reboot or 'systemctl reload dbus' before starting sil6250d"
 
   log "Installing systemd unit -> /etc/systemd/system/sil6250d.service"
   local unit
@@ -117,17 +134,17 @@ main() {
     esac
   done
 
-  # Enrollment only works once the whole stack is present: the virtual FpDevice
-  # is bound after fprintd's drop-in
-  # ('fprintd') are installed. A subset run (e.g. just 'kernel') leaves
+  # Enrollment only works once the whole stack is present: the kernel module
+  # exposes /dev/sil6250, and sil6250d ('daemon') registers the device with
+  # open-fprintd over D-Bus. A subset run (e.g. just 'kernel') leaves
   # fprintd-enroll failing with NoSuchDevice, so don't imply it's ready.
   local ran=" ${stages[*]} "
-  if [[ "$ran" == *" fprintd "* ]]; then
+  if [[ "$ran" == *" kernel "* && "$ran" == *" daemon "* ]]; then
     log "Done. Enroll with: fprintd-enroll (or GNOME/KDE Settings)"
   else
     warn "Partial install (ran:${stages[*]})."
-    warn "fprintd-enroll needs the full stack — the virtual device only binds after the"
-    warn "'fprintd' stages. Re-run ./install.sh with no arguments for everything."
+    warn "fprintd-enroll needs the full stack — the device only registers after BOTH the"
+    warn "'kernel' and 'daemon' stages. Re-run ./install.sh with no arguments for everything."
   fi
 }
 

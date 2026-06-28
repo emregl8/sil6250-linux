@@ -204,6 +204,12 @@ fn read_chunk(dev: &mut PetaicDev, out: &mut [u8]) -> io::Result<usize> {
     let rx_cap = (SC_RX_OFF + want + 16).min(PETAIC_READ_CHUNK_MAX) & !7;
     let mut rx = [0u8; PETAIC_READ_CHUNK_MAX];
 
+    // Bound the lone-marker continuation loop: a wedged sensor that keeps
+    // returning the 0x5A continuation marker would otherwise spin forever,
+    // hanging the capture thread (and the login sensor) indefinitely.
+    const MAX_CONTINUATIONS: u32 = 64;
+    let mut continuations = 0u32;
+
     loop {
         let r = dev.xfer_raw(0, 0, 0, 0, 0, &[], &mut rx[..rx_cap], 3, 350, PETAIC_XFER_READ_ONLY);
         match r {
@@ -218,6 +224,10 @@ fn read_chunk(dev: &mut PetaicDev, out: &mut [u8]) -> io::Result<usize> {
         }
         // Skip lone 0x5A continuation marker.
         if navail == 1 && rx[SC_RX_OFF] == 0x5a {
+            continuations += 1;
+            if continuations >= MAX_CONTINUATIONS {
+                return Ok(0);
+            }
             continue;
         }
         let n = navail.min(want).min(rx_cap.saturating_sub(SC_RX_OFF));
