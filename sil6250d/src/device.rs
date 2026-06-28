@@ -7,17 +7,15 @@ use zbus::{interface, object_server::SignalEmitter};
 use crate::engine::{Engine, Features, Frame};
 use crate::storage;
 
-const ENROLL_STAGES: u32 = 12;
+const ENROLL_STAGES: u32 = 15;
 const FINGER_MS: u32 = 15_000;
 const LIFT_MS: u32 = 4_000;
 const MAX_SHIFT: i32 = 14;
 const MIN_OVERLAP: i32 = 1200;
-const ENROLL_MAX_NCC: f32 = 0.95;
+const ENROLL_MAX_NCC: f32 = 0.85;
 const ENROLL_MAX_REDUNDANT: u32 = ENROLL_STAGES * 4;
 const QUALITY_MIN: f32 = 0.52;
-const QUALITY_MAX_RETRY: u32 = 3;
 const SIFT_THRESHOLD: i32 = 5;
-const VERIFY_FRAMES: u32 = 3;
 
 pub const OBJECT_PATH: &str = "/io/github/uunicorn/Fprint/Device";
 
@@ -144,17 +142,25 @@ impl DeviceService {
         let emitter = emitter.to_owned();
 
         tokio::task::spawn(async move {
-            let result = tokio::task::spawn_blocking(move || {
-                verify_blocking(&devpath, &username, &finger_name, &cancelled)
+            let result = tokio::task::spawn_blocking({
+                let cancelled = Arc::clone(&cancelled);
+                let emitter = emitter.clone();
+                let username = username.clone();
+                let finger_name = finger_name.clone();
+                move || verify_blocking(&devpath, &username, &finger_name, &cancelled, emitter)
             })
             .await;
 
+            // Only the terminal decision is emitted here; the non-terminal
+            // "verify-retry-scan" signals for poor scans are emitted from inside
+            // verify_blocking as the user re-presses, so any error returned here
+            // is final and must complete the operation (done = true).
             let (status, done) = match result {
                 Ok(Ok(true)) => ("verify-match", true),
                 Ok(Ok(false)) => ("verify-no-match", true),
                 Ok(Err(e)) => {
                     tracing::warn!("verify error: {e}");
-                    ("verify-retry-scan", false)
+                    ("verify-no-match", true)
                 }
                 Err(e) => {
                     tracing::error!("verify task panicked: {e}");
@@ -188,7 +194,9 @@ impl DeviceService {
     }
 
     async fn run_cmd(&self, _cmd: &str) -> zbus::fdo::Result<String> {
-        Err(zbus::fdo::Error::NotSupported("RunCmd not implemented".into()))
+        Err(zbus::fdo::Error::NotSupported(
+            "RunCmd not implemented".into(),
+        ))
     }
 
     #[zbus(signal)]
@@ -206,10 +214,7 @@ impl DeviceService {
     ) -> zbus::Result<()>;
 
     #[zbus(signal)]
-    async fn verify_finger_selected(
-        emitter: &SignalEmitter<'_>,
-        finger: &str,
-    ) -> zbus::Result<()>;
+    async fn verify_finger_selected(emitter: &SignalEmitter<'_>, finger: &str) -> zbus::Result<()>;
 }
 
 fn enroll_blocking(
@@ -232,13 +237,29 @@ fn enroll_blocking(
             anyhow::bail!("cancelled");
         }
 
-        let Some((frame, _raw)) = engine.capture(FINGER_MS, QUALITY_MIN, QUALITY_MAX_RETRY) else {
+        // Single capture per presentation; classify quality ourselves rather
+        // than letting capture() force a low-quality frame through on its last
+        // retry. No finger / unusable read just keeps waiting for a press.
+        let Some((frame, _raw)) = engine.capture(FINGER_MS, 0.0, 0) else {
+            continue;
+        };
+
+        // Reject poor scans outright: a weak frame pollutes the gallery and
+        // drags down genuine match scores. Ask the user to present again.
+        let q = frame.quality();
+        if q < QUALITY_MIN {
+            tracing::debug!(q, quality_min = QUALITY_MIN, "enroll: poor scan, retry");
+            let em = emitter.clone();
+            rt.block_on(async move {
+                let _ = DeviceService::enroll_status(&em, "enroll-retry-scan", false).await;
+            });
             redundant += 1;
             if redundant >= ENROLL_MAX_REDUNDANT {
                 break;
             }
+            engine.wait_finger_up(LIFT_MS);
             continue;
-        };
+        }
 
         let too_similar = kept_frames
             .iter()
@@ -268,6 +289,8 @@ fn enroll_blocking(
         anyhow::bail!("captured too few frames ({got})");
     }
 
+    let kp_counts: Vec<usize> = kept_features.iter().map(|f| f.kp.len()).collect();
+    tracing::debug!(stages = got, ?kp_counts, "enroll complete");
     storage::save_features(username, finger_name, &kept_features)?;
     Ok(())
 }
@@ -277,39 +300,69 @@ fn verify_blocking(
     username: &str,
     finger_name: &str,
     cancelled: &AtomicBool,
+    emitter: SignalEmitter<'_>,
 ) -> anyhow::Result<bool> {
-    let gallery = storage::load_features(username, finger_name)?;
+    // fprintd uses the sentinel finger "any" to mean "match against any
+    // enrolled finger". Build a combined gallery from every stored finger in
+    // that case; otherwise load the single requested finger.
+    let gallery = if finger_name == "any" {
+        let mut all = Vec::new();
+        for finger in storage::list_enrolled(username) {
+            all.extend(storage::load_features(username, &finger)?);
+        }
+        all
+    } else {
+        storage::load_features(username, finger_name)?
+    };
     if gallery.is_empty() {
         anyhow::bail!("no enrolled data for {username}/{finger_name}");
     }
 
     let mut engine = Engine::open(devpath)?;
-    let mut best = -1i32;
-    let mut got_any = false;
+    let rt = tokio::runtime::Handle::current();
 
-    for _ in 0..VERIFY_FRAMES {
+    // Canonical press-sensor loop: one finger presentation per round. A poor or
+    // unusable scan is reported as a non-terminal "verify-retry-scan" so the user
+    // simply re-presses with no penalty and no client round-trip; only a
+    // good-quality capture yields a match / no-match decision.
+    loop {
         if cancelled.load(Ordering::Relaxed) {
             anyhow::bail!("cancelled");
         }
-        let Some((frame, _raw)) = engine.capture(FINGER_MS, QUALITY_MIN, QUALITY_MAX_RETRY)
-        else {
-            if !got_any {
-                anyhow::bail!("capture failed");
-            }
-            break;
+
+        // quality_min = 0, max_retry = 0: take a single frame and classify the
+        // scan ourselves rather than letting capture() silently re-prompt.
+        let Some((frame, _raw)) = engine.capture(FINGER_MS, 0.0, 0) else {
+            // No finger or an unusable read this round — keep waiting for a press.
+            continue;
         };
-        got_any = true;
+
+        let q = frame.quality();
+        if q < QUALITY_MIN {
+            tracing::debug!(q, quality_min = QUALITY_MIN, "verify: poor scan, retry");
+            let em = emitter.clone();
+            rt.block_on(async move {
+                let _ = DeviceService::verify_status(&em, "verify-retry-scan", false).await;
+            });
+            engine.wait_finger_up(LIFT_MS);
+            continue;
+        }
+
         let probe = Features::extract(&frame);
         let score = probe.verify_against(&gallery);
-        tracing::debug!(score, "verify frame");
-        if score > best {
-            best = score;
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            let per: Vec<i32> = gallery
+                .iter()
+                .map(|g| probe.verify_against(std::slice::from_ref(g)))
+                .collect();
+            tracing::debug!(
+                probe_kp = probe.kp.len(),
+                gallery = gallery.len(),
+                ?per,
+                "verify inliers"
+            );
         }
-        if best >= SIFT_THRESHOLD {
-            break;
-        }
+        tracing::debug!(score, q, threshold = SIFT_THRESHOLD, "verify result");
+        return Ok(score >= SIFT_THRESHOLD);
     }
-
-    tracing::debug!(best, threshold = SIFT_THRESHOLD, "verify result");
-    Ok(best >= SIFT_THRESHOLD)
 }

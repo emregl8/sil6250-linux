@@ -16,8 +16,11 @@ const SERVICE_NAME: &str = "io.github.uunicorn.Fprint";
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("sil6250d=info".parse().unwrap()),
+            // Honor RUST_LOG when set (e.g. RUST_LOG=sil6250d=debug); fall back
+            // to info-level for our crate otherwise. Adding an explicit
+            // directive on top of from_default_env() would override RUST_LOG.
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("sil6250d=info")),
         )
         .init();
 
