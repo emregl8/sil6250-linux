@@ -4,7 +4,7 @@ How this driver stack was built, end to end — from "Linux sees no fingerprint
 device at all" to a working `fprintd` login on the Huawei MateBook X Pro 2024.
 
 This document is the narrative companion to the code. It explains _why_ each
-component (`kernel/`, `lib/`, `tools/`, `fprint-driver/`) exists and how each
+component (`kernel/`, `sil6250/`, `sil6250d/`) exists and how each
 fact it encodes was recovered. Nothing here is needed to _use_ the driver — see
 the top-level `README.md` for that — but everything here is needed to _trust_,
 _audit_, or _extend_ it.
@@ -21,7 +21,7 @@ _audit_, or _extend_ it.
   kernel module `sil6250.ko` (`kernel/`) is a thin broker for exactly these three
   resources and nothing else.
 - All command framing, a **TLS-PSK secure channel**, and the **image capture
-  loop** live in userspace (`lib/`, `libsil6250`). The PSK ring was recovered
+  loop** live in userspace (`sil6250/`, the Rust library). The PSK ring was recovered
   from the Windows service binary; this unit uses the key `shiba`.
 - The sensor is **Match-on-Host**: it streams raw 64×80 images and does _no_
   matching itself. There is **no firmware calibration** — the raw frame is
@@ -29,7 +29,7 @@ _audit_, or _extend_ it.
 - The 3.2 × 4 mm patch is too small for classical minutiae matching. The Windows
   matcher is a **local-feature keypoint + descriptor + geometric-verification**
   algorithm (SIFT-class), which we reverse-engineered and reimplemented
-  **clean-room** in `lib/petaic_sift.c`.
+  **clean-room** in `sil6250/src/sift.rs`.
 - Single-frame match-on-host on this tiny sensor is intrinsically marginal
   (~30 % single-frame FRR is the _sensor ceiling_ — the original Windows matcher
   hits it too); the shipped stack reaches usable accuracy with a quality gate,
@@ -155,7 +155,7 @@ matched the sibling-driver model exactly:
   (writes at `+0x000`, reads at `+0x200`).
 
 So the per-command sequence the userspace driver implements
-(`lib/petaic_transport.c`) is:
+(`sil6250/src/transport.rs`) is:
 
 ```
 lock (get_spb_permission)
@@ -168,8 +168,8 @@ lock (get_spb_permission)
 unlock (put_spb_permission)
 ```
 
-`lib/petaic_transport.c` owns this whole transaction; the kernel only provides
-the three primitives. `tools/petaic_record` is the bring-up smoke test for it.
+`sil6250/src/transport.rs` owns this whole transaction; the kernel only provides
+the three primitives.
 
 ### 3.4 Picking the right Windows driver
 
@@ -191,8 +191,8 @@ Two things distinguished the correct one:
 
 The **Match-on-Host** finding is the pivotal architectural fact: the sensor
 streams raw images and does no matching, so a Linux driver must supply the entire
-matching engine, not just transport. That is why this repo has a `lib/` with a
-matcher in it at all.
+matching engine, not just transport. That is why this repo has a `sil6250/` crate
+with a full matcher in it.
 
 ---
 
@@ -230,7 +230,7 @@ Three corrections cost real debugging time and are worth recording:
    independent `ec_transfer` arguments that merely coincide for some commands.
 3. **The frame must be physically 27 bytes** even when the payload is zero; the
    firmware rejects short frames regardless of checksum. This is
-   `PETAIT_STD_PAYLOAD_REGION = 7` in `lib/petaic_proto.c`.
+   `PETAIT_STD_PAYLOAD_REGION = 7` in `sil6250/src/proto.rs`.
 
 The command set actually used by the stack:
 
@@ -246,7 +246,7 @@ The command set actually used by the stack:
 | `0x20`         | module info (id `80 33 5f 9c aa`) — **not** calibration          |
 | `0x13`, `0x21` | host-side no-ops (`SendCmdToFirmware … ignore this cmd`)         |
 
-Frame build/parse/checksum is `lib/petaic_proto.c`.
+Frame build/parse/checksum is `sil6250/src/proto.rs`.
 
 ---
 
@@ -288,15 +288,15 @@ truncated to 32 bytes) and is independent of which PSK the sensor holds — a
 subtlety that initially looked like "the dog name should appear on the wire" but
 doesn't.
 
-The handshake is `tools/petaic_tls` (smoke test) and `lib/petaic_engine.c`
-(production path, mbedTLS server BIOs wrapping the mailbox transport).
+The production path is `sil6250/src/engine.rs` (OpenSSL server BIOs wrapping
+the mailbox transport).
 
 ---
 
 ## 6. The capture loop and its non-obvious traps
 
 Each of the following cost a debugging round-trip and is now baked into
-`lib/petaic_engine.c`:
+`sil6250/src/engine.rs`:
 
 1. **Finger detection is `0x11` polling, never the GpioInt.** The interrupt is
    **level-triggered** and fires spuriously on a residual assertion left by the
@@ -320,8 +320,7 @@ Each of the following cost a debugging round-trip and is now baked into
 
 Multiple captures work cleanly on one TLS session (the two records land exactly
 on a GCM record boundary), so the engine grabs N frames per touch without
-re-handshaking. `tools/petaic_capture` is the standalone capture; `tools/qlive`
-exercises the full live enroll/verify path.
+re-handshaking.
 
 ---
 
@@ -345,7 +344,7 @@ The raw frame is dominated by coherent **per-column fixed-pattern noise** (senso
 multiplexing produces a periodic ~8-column dip). Destriping drops the per-column
 mean std from ~8.6 to ~5.3 and exposes a real but weak ridge peak (~508 dpi
 pitch). This destripe is the `pm_destripe` front-end shared by both matchers in
-`lib/petaic_match.c`.
+`sil6250/src/matcher.rs`.
 
 ---
 
@@ -362,13 +361,13 @@ this **3.2 × 4 mm, 64×80** patch a single frame yields only **0–3 minutiae**
 _worse_). bozorth3 needs ~12+ overlapping minutiae. So the `FpImageDevice` path
 is a dead end. That is why the libfprint driver subclasses **`FpDevice`** (the
 match-on-chip pattern) and stores templates as `FPI_PRINT_RAW`, with matching
-done on the host CPU — see `fprint-driver/sil6250.c`.
+done on the host CPU — see `sil6250/src/matcher.rs` and `sil6250/src/sift.rs`.
 
 ### 8.2 First attempt: correlation (NCC) — and why it failed
 
 Windows clearly matches single 64×80 frames (it enrolls 14 individually-matched
 samples, no mosaicing), which is only possible with a **correlation/pattern**
-matcher. So the first implementation (`lib/petaic_match.c`) was best-shift
+matcher. So the first implementation (`sil6250/src/matcher.rs`) was best-shift
 **normalized cross-correlation** over a destriped-frame gallery, with a local-
 normalize bandpass that proved load-bearing (it killed cross-finger blob
 correlation).
@@ -466,7 +465,7 @@ Harris is 1988; RANSAC is 1981).
 
 ## 10. The clean-room matcher (what ships)
 
-`lib/petaic_sift.c` is a from-scratch, pure-C (libm only) reimplementation of the
+`sil6250/src/sift.rs` is a from-scratch Rust reimplementation of the
 recovered design — **no DLL at runtime**, upstreamable to libfprint:
 
 - multi-scale **Harris** detection (NMS, ≤200 keypoints),
@@ -486,9 +485,8 @@ A clean-room analogue of the quality gate (`ImageQualityJudge`) also lives here
 as `ps_quality()` — mean **orientation-tensor coherence** over textured blocks —
 which cleanly separates weak presses from firm ones.
 
-The offline tuning harnesses are `tools/petaic_sift_roc` (SIFT matcher) and
-`tools/petaic_roc` (the legacy NCC matcher), both operating on PGM sets with no
-hardware needed.
+The offline tuning was done with standalone harnesses operating on PGM sets with
+no hardware needed.
 
 ---
 
@@ -549,33 +547,33 @@ findings above:
 ```
   GNOME/KDE Settings, PAM (sudo/login)
             │  D-Bus
-          fprintd                              §12 (persistence limits)
-            │
-        libfprint ── fprint-driver/sil6250.c   §8.1 FpDevice + FPI_PRINT_RAW
-            │                  │ links
-            │            ┌─────┴────────────────────────────────┐
-            │            │  lib/  (libsil6250)                   │
-            │            │  • petaic_proto   mailbox framing  §4 │
-            │            │  • petaic_transport  EC mailbox    §3 │
-            │            │  • petaic_engine  TLS-PSK+capture §5,6│
-            │            │  • petaic_match   destripe + NCC §7,8 │
-            │            │  • petaic_sift    clean-room SIFT §10  │
-            │            └─────┬────────────────────────────────┘
-            │                  │ /dev/sil6250  (mmap + ioctl)
-            │            kernel/sil6250.ko   resource broker  §2,3
-            │                  │ ACPI platform device "SIL6250"
-        hardware ─────────────┘  mailbox window + GPIO strobes + IRQ
+          open-fprintd                         §12 (persistence limits)
+            │  io.github.uunicorn.Fprint.Device
+          sil6250d/                            standalone Rust daemon
+            │ uses
+      ┌─────┴────────────────────────────────────┐
+      │  sil6250/  (Rust library crate)           │
+      │  • proto.rs       mailbox framing     §4  │
+      │  • transport.rs   EC mailbox          §3  │
+      │  • engine.rs      TLS-PSK + capture §5,6  │
+      │  • matcher.rs     destripe + NCC    §7,8  │
+      │  • sift.rs        clean-room SIFT    §10  │
+      └─────┬────────────────────────────────────┘
+            │ /dev/sil6250  (mmap + ioctl)
+      kernel/sil6250.ko  resource broker (C)  §2,3
+            │ ACPI platform device "SIL6250"
+    hardware   mailbox window + GPIO strobes + IRQ
 ```
 
 - **`kernel/`** — the EC mailbox transport contract (§2–§3), and _only_ that: no
   framing, no crypto, no matching.
-- **`lib/`** — framing (§4), the EC transaction (§3.3), the TLS-PSK channel (§5),
-  the capture loop with all its traps (§6), the destripe (§7), and both the
-  legacy NCC (§8.2) and the shipped clean-room SIFT (§10) matchers.
-- **`tools/`** — the bring-up and validation harnesses (`petaic_record` §3.3,
-  `petaic_tls` §5, `petaic_capture`/`qlive` §6, `petaic_roc`/`petaic_sift_roc`
-  §10–§11).
-- **`fprint-driver/`** — the `FpDevice` adapter and the libfprint overlay (§8.1).
+- **`sil6250/`** — framing (§4), the EC transaction (§3.3), the TLS-PSK channel
+  (§5), the capture loop with all its traps (§6), the destripe (§7), and both
+  the legacy NCC (§8.2) and the shipped clean-room SIFT (§10) matchers.  A pure
+  Rust library crate.
+- **`sil6250d/`** — the open-fprintd backend daemon (§8.1 equivalent): registers
+  the `io.github.uunicorn.Fprint.Device` D-Bus interface and drives the
+  `sil6250` crate from async Tokio tasks.
 
 ---
 
@@ -616,11 +614,10 @@ worked in the lab.
   pushing the matcher further.
 - **Template adaptation is deferred** — no persistence path through stock
   `fprintd` 1.94 (§12).
-- **Discovery** is via the `FP_SIL6250` environment variable (a systemd drop-in
-  exports it to `fprintd`), because the mailbox node is neither `hidraw` nor
-  `spidev` and libfprint's udev backend can't enumerate it. Full udev
-  auto-discovery would need a libfprint-core patch and is deferred to keep the
-  forked surface to a single adapter file.
+- **Discovery** is handled by `sil6250d` registering directly with open-fprintd
+  over D-Bus, bypassing libfprint's udev enumeration entirely.  The mailbox node
+  (`/dev/sil6250`) is not `hidraw` or `spidev`, so libfprint's normal device
+  scan cannot find it — the open-fprintd model avoids this problem by design.
 - **The richer dual descriptor** (the matcher's coarse 80-D companion, plus its
   `median_quantizationLocal` preprocessing) is recovered but not yet ported; it
   is the highest-effort remaining lever if the capture-side gates ever prove

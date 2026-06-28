@@ -1,0 +1,22 @@
+[Unit]
+Description=Silead SIL6250 fingerprint daemon (open-fprintd backend)
+After=dbus.socket
+# Register with open-fprintd whenever it appears; the daemon watches for the
+# manager name on the bus and re-registers automatically, so order here is soft.
+Wants=open-fprintd.service
+After=open-fprintd.service
+
+[Service]
+Type=dbus
+BusName=io.github.uunicorn.Fprint
+ExecStart=/usr/local/bin/sil6250d
+Environment=SIL6250_DEV=/dev/sil6250
+User=root
+Group=root
+# /dev/sil6250 is a misc char device not on fprintd's default DeviceAllow list.
+DeviceAllow=/dev/sil6250 rw
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

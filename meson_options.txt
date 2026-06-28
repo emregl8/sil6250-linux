@@ -1,6 +1,0 @@
-option(
-  'tools',
-  type: 'boolean',
-  value: true,
-  description: 'Build the CLI bring-up / capture / matcher-ROC utilities in tools/',
-)
