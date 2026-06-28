@@ -20,11 +20,32 @@ pub fn init_storage() -> io::Result<()> {
     Ok(())
 }
 
-fn finger_path(username: &str, finger: &str) -> PathBuf {
-    Path::new(STORAGE_DIR)
+/// Reject any name that could escape the storage root when used as a path
+/// component. Defense-in-depth: callers come in over D-Bus via open-fprintd,
+/// but a `..`, `/`, empty, or NUL-bearing username/finger must never be turned
+/// into a path that walks outside STORAGE_DIR.
+fn check_component(name: &str) -> io::Result<()> {
+    if name.is_empty()
+        || name == "."
+        || name == ".."
+        || name.contains('/')
+        || name.contains('\0')
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("invalid path component: {name:?}"),
+        ));
+    }
+    Ok(())
+}
+
+fn finger_path(username: &str, finger: &str) -> io::Result<PathBuf> {
+    check_component(username)?;
+    check_component(finger)?;
+    Ok(Path::new(STORAGE_DIR)
         .join(username)
         .join(finger)
-        .join("features.bin")
+        .join("features.bin"))
 }
 
 /// Persist extracted feature sets to disk.
@@ -33,7 +54,7 @@ fn finger_path(username: &str, finger: &str) -> PathBuf {
 /// blob so verification can load them directly without re-extracting from
 /// raw sensor images.
 pub fn save_features(username: &str, finger: &str, features: &[Features]) -> io::Result<()> {
-    let path = finger_path(username, finger);
+    let path = finger_path(username, finger)?;
     let parent = path.parent().unwrap();
     DirBuilder::new()
         .recursive(true)
@@ -55,7 +76,7 @@ pub fn save_features(username: &str, finger: &str, features: &[Features]) -> io:
 
 /// Load stored extracted feature sets. Returns an empty vec if nothing stored.
 pub fn load_features(username: &str, finger: &str) -> io::Result<Vec<Features>> {
-    let path = finger_path(username, finger);
+    let path = finger_path(username, finger)?;
     let mut f = match std::fs::File::open(&path) {
         Ok(f) => f,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(vec![]),
@@ -86,6 +107,9 @@ pub fn load_features(username: &str, finger: &str) -> io::Result<Vec<Features>> 
 
 /// List finger names with stored data for `username`.
 pub fn list_enrolled(username: &str) -> Vec<String> {
+    if check_component(username).is_err() {
+        return vec![];
+    }
     let user_dir = Path::new(STORAGE_DIR).join(username);
     let Ok(rd) = std::fs::read_dir(&user_dir) else {
         return vec![];
@@ -101,6 +125,7 @@ pub fn list_enrolled(username: &str) -> Vec<String> {
 
 /// Delete all enrolled fingers for `username`.
 pub fn delete_enrolled(username: &str) -> io::Result<()> {
+    check_component(username)?;
     let user_dir = Path::new(STORAGE_DIR).join(username);
     if user_dir.exists() {
         std::fs::remove_dir_all(&user_dir)?;
