@@ -118,16 +118,16 @@ main() {
   done
 
   # Enrollment only works once the whole stack is present: the virtual FpDevice
-  # is bound after BOTH the patched libfprint ('libfprint') and fprintd's drop-in
+  # is bound after fprintd's drop-in
   # ('fprintd') are installed. A subset run (e.g. just 'kernel') leaves
   # fprintd-enroll failing with NoSuchDevice, so don't imply it's ready.
   local ran=" ${stages[*]} "
-  if [[ "$ran" == *" fprintd "* && "$ran" == *" libfprint "* ]]; then
+  if [[ "$ran" == *" fprintd "* ]]; then
     log "Done. Enroll with: fprintd-enroll (or GNOME/KDE Settings)"
   else
     warn "Partial install (ran:${stages[*]})."
     warn "fprintd-enroll needs the full stack — the virtual device only binds after the"
-    warn "'fprintd' and 'libfprint' stages. Re-run ./install.sh with no arguments for everything."
+    warn "'fprintd' stages. Re-run ./install.sh with no arguments for everything."
   fi
 }
 

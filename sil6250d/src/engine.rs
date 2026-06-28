@@ -11,6 +11,12 @@ impl Engine {
     pub fn open(devpath: &str) -> io::Result<Self> {
         let mut e = sil6250::Engine::open(devpath)?;
         e.set_key(Some("shiba"))?;
+        // SIL6250_VERBOSE=1 enables the library's low-level transport tracing
+        // (TX/RX dumps, finger polls, checksum mismatches) on stderr, which the
+        // service captures into the journal. Diagnostic only; off by default.
+        if std::env::var_os("SIL6250_VERBOSE").is_some() {
+            e.set_verbose(true);
+        }
         Ok(Engine(e))
     }
 
