@@ -9,6 +9,7 @@
 #
 #   ./install.sh kernel        # just the kernel module
 #   ./install.sh               # everything
+#   ./install.sh check         # report a stale installed/running daemon, no changes
 #
 # Environment:
 #   PREFIX  install prefix for sil6250d binary (default /usr/local)
@@ -122,15 +123,65 @@ secure_boot_enabled() {
   [ "$last" = "1" ]
 }
 
+# Guards against the "stale daemon" trap: the running sil6250d can silently lag
+# the source after a `git pull` or local edit if the daemon stage is never re-run,
+# so the code you are reading is not the code that is executing. Reports two
+# independent mismatches (best-effort, never fatal):
+#   1. installed binary older than the source tree     -> rebuild  (./install.sh daemon)
+#   2. running service older than the installed binary  -> restart  (systemctl restart sil6250d)
+check_daemon_freshness() {
+  local bin="$PREFIX/bin/sil6250d"
+  [ -x "$bin" ] || { warn "No installed daemon at $bin yet (run ./install.sh daemon)."; return 0; }
+
+  local binmt
+  binmt="$(stat -c %Y "$bin" 2>/dev/null)" || return 0
+
+  # Newest mtime across daemon + library sources and the lockfiles. A git checkout
+  # stamps pulled files with the checkout time, so a post-pull tree reads newer
+  # than a binary built before the pull -- exactly the case we want to flag.
+  local newest
+  newest="$(find "$HERE/sil6250/src" "$HERE/sil6250d/src" \
+                 "$HERE/Cargo.toml" "$HERE/Cargo.lock" \
+                 "$HERE/sil6250/Cargo.toml" "$HERE/sil6250d/Cargo.toml" \
+                 -type f -printf '%T@\n' 2>/dev/null | sort -rn | head -1)"
+  if [ -n "$newest" ] && [ "${newest%.*}" -gt "$binmt" ]; then
+    warn "Installed daemon is OLDER than the source tree ($bin)."
+    warn "You likely pulled or edited without rebuilding; the running sil6250d is stale."
+    warn "Rebuild + reinstall:  ./install.sh daemon"
+  fi
+
+  # Running service started before the installed binary's mtime -> installed but
+  # never restarted, so the live process is executing the previous binary.
+  local started startmt
+  started="$(systemctl show sil6250d -p ExecMainStartTimestamp --value 2>/dev/null)"
+  if [ -n "$started" ]; then
+    startmt="$(date -d "$started" +%s 2>/dev/null || true)"
+    if [ -n "$startmt" ] && [ "$binmt" -gt "$startmt" ]; then
+      warn "Running sil6250d started BEFORE the installed binary was last updated."
+      warn "The live process is stale relative to $bin. Restart it:"
+      warn "    sudo systemctl restart sil6250d"
+    fi
+  fi
+}
+
 
 main() {
   local stages=("$@")
   [ ${#stages[@]} -eq 0 ] && stages=(kernel daemon)
+
+  # Diagnostics-only run: report daemon freshness and exit, with none of the
+  # install-completion messaging that assumes a kernel/daemon install happened.
+  if [ "${stages[*]}" = "check" ]; then
+    check_daemon_freshness
+    return
+  fi
+
   for s in "${stages[@]}"; do
     case "$s" in
       kernel) stage_kernel ;;
       daemon) stage_daemon ;;
-      *) die "unknown stage '$s' (kernel|daemon)" ;;
+      check)  check_daemon_freshness ;;
+      *) die "unknown stage '$s' (kernel|daemon|check)" ;;
     esac
   done
 
@@ -146,6 +197,13 @@ main() {
     warn "fprintd-enroll needs the full stack — the device only registers after BOTH the"
     warn "'kernel' and 'daemon' stages. Re-run ./install.sh with no arguments for everything."
   fi
+
+  # Surface a stale running daemon when this run didn't already refresh it (the
+  # 'daemon' stage rebuilds+restarts, and 'check' has reported already).
+  case " ${stages[*]} " in
+    *" daemon "*|*" check "*) : ;;
+    *) check_daemon_freshness ;;
+  esac
 }
 
 main "$@"
