@@ -15,9 +15,6 @@ reimplementation built from reverse engineering.
 
 ## Quick start
 
-Installation is manual at this time. If there is demand, we can investigate pushing
-it to AUR or creating a ppa.
-
 Install [open-fprintd](https://github.com/uunicorn/open-fprintd) first (your
 distro may package it).
 
@@ -30,19 +27,43 @@ cd open-fprintd
 ./setup.py install --force --install-layout deb --prefix=/usr --root=/
 ```
 
-Next, install the actual drivers for the fingerprint sensor from this repo:
+### Arch Linux (recommended): `makepkg`
+
+The stack is packaged as two `PKGBUILD`s under
+[`packaging/aur/`](packaging/aur/): `sil6250-dkms` (kernel module + udev rule,
+via DKMS) and `sil6250d` (the daemon, systemd unit, D-Bus policy). They are not
+on the AUR yet, so build them from this checkout. Build the DKMS package first —
+`sil6250d` depends on it:
 
 ```sh
 git clone https://github.com/AlexDaichendt/sil6250-linux.git
-cd sil6250-linux 
+cd sil6250-linux
+
+(cd packaging/aur/sil6250-dkms && makepkg -si)   # kernel module + udev rule
+(cd packaging/aur/sil6250d    && makepkg -si)    # daemon (pulls in open-fprintd)
+
+# The sil6250d package loads the module and enables+starts the service for you.
+# enroll a finger via CLI (or any GUI program — they all use fprintd underneath)
+fprintd-enroll
+```
+
+`makepkg -si` builds the package and installs it with `pacman`, so everything is
+tracked and uninstallable with `pacman -R sil6250d sil6250-dkms`. These are VCS
+(`-git`) packages that build from the current `main`. See
+[`packaging/aur/README.md`](packaging/aur/README.md) for details.
+
+### Other distros: `install.sh`
+
+```sh
+git clone https://github.com/AlexDaichendt/sil6250-linux.git
+cd sil6250-linux
 
 # build + install everything (kernel module, sil6250d daemon)
-# Tested on CachyOS and Omarchy - in case it fails, you can easily install the components by hand. 
+# Tested on CachyOS and Omarchy - in case it fails, you can easily install the components by hand.
 # Check the install.sh script what it is copying where.
 ./install.sh
 
-# enroll a finger via CLI (or use a GUI program - they are all internally based on this fprintd)
-fprintd-enroll          
+fprintd-enroll
 ```
 
 `install.sh` runs two stages — `kernel`, `daemon` — and you can run any subset,

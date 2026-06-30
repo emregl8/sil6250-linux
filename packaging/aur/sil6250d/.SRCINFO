@@ -1,0 +1,20 @@
+pkgbase = sil6250d-git
+	pkgdesc = Silead SIL6250 fingerprint daemon (open-fprintd backend)
+	pkgver = 0.1.0
+	pkgrel = 1
+	url = https://github.com/AlexDaichendt/sil6250-linux
+	install = sil6250d.install
+	arch = x86_64
+	license = GPL2
+	makedepends = git
+	makedepends = cargo
+	depends = sil6250-dkms
+	depends = open-fprintd
+	depends = openssl
+	depends = gcc-libs
+	provides = sil6250d=0.1.0
+	conflicts = sil6250d
+	source = git+https://github.com/AlexDaichendt/sil6250-linux.git
+	sha256sums = SKIP
+
+pkgname = sil6250d-git

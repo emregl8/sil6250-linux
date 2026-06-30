@@ -1,0 +1,58 @@
+# Maintainer: Alexander Daichendt <claude@daichendt.one>
+#
+# open-fprintd backend daemon for the SIL6250 reader. Registers the device with
+# open-fprintd over D-Bus so fprintd-enroll/verify work. Needs the kernel
+# module (sil6250-dkms) for /dev/sil6250 and open-fprintd as the manager.
+
+pkgname=sil6250d-git
+pkgver=0.1.0.r17.gd3fe97b
+pkgrel=1
+pkgdesc="Silead SIL6250 fingerprint daemon (open-fprintd backend)"
+arch=('x86_64')
+url="https://github.com/AlexDaichendt/sil6250-linux"
+license=('GPL2')
+depends=('sil6250-dkms' 'open-fprintd' 'openssl' 'gcc-libs')
+makedepends=('git' 'cargo')
+provides=("sil6250d=${pkgver}")
+conflicts=('sil6250d')
+install=sil6250d.install
+source=("git+https://github.com/AlexDaichendt/sil6250-linux.git")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd "${srcdir}/sil6250-linux"
+  printf '%s.r%s.g%s' \
+    "$(sed -n 's/^version = "\(.*\)"/\1/p' sil6250d/Cargo.toml | head -1)" \
+    "$(git rev-list --count HEAD)" \
+    "$(git rev-parse --short HEAD)"
+}
+
+prepare() {
+  cd "${srcdir}/sil6250-linux"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "${srcdir}/sil6250-linux"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release -p sil6250d
+}
+
+package() {
+  cd "${srcdir}/sil6250-linux"
+
+  install -Dm755 target/release/sil6250d "${pkgdir}/usr/bin/sil6250d"
+
+  # systemd unit ships an ExecStart of /usr/local/bin/sil6250d (matching
+  # install.sh's default PREFIX); rewrite it to the packaged /usr/bin path.
+  install -dm755 "${pkgdir}/usr/lib/systemd/system"
+  sed 's|/usr/local/bin/sil6250d|/usr/bin/sil6250d|' \
+    sil6250d/sil6250d.service > "${pkgdir}/usr/lib/systemd/system/sil6250d.service"
+
+  # D-Bus policy letting sil6250d own io.github.uunicorn.Fprint. /usr/share is
+  # the packaged location (/etc is for local admin overrides).
+  install -Dm644 sil6250d/io.github.uunicorn.Fprint.conf \
+    "${pkgdir}/usr/share/dbus-1/system.d/io.github.uunicorn.Fprint.conf"
+}

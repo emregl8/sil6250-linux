@@ -1,0 +1,46 @@
+_reload_dbus() {
+  # The system bus must re-read its config before sil6250d may own
+  # io.github.uunicorn.Fprint; without this its first start fails with
+  # "Request to own name refused by policy" until the next dbus reload/reboot.
+  systemctl reload dbus 2>/dev/null \
+    || systemctl reload dbus-broker 2>/dev/null \
+    || true
+}
+
+_load_module() {
+  # Bring up /dev/sil6250 so the daemon has a device on first install. On a
+  # normal boot systemd-udev autoloads the module via its ACPI alias; this
+  # covers installing without a reboot. Harmless if the sensor is absent.
+  modprobe sil6250 2>/dev/null || true
+  udevadm trigger -s misc 2>/dev/null || true
+}
+
+post_install() {
+  _load_module
+  _reload_dbus
+  systemctl daemon-reload 2>/dev/null || true
+  # NOTE: enabling/starting in a scriptlet deviates from Arch packaging
+  # guidelines (which leave this to the user). Kept for one-shot convenience;
+  # drop these two lines if this is ever published to the AUR.
+  systemctl enable --now sil6250d.service 2>/dev/null || true
+  cat <<'EOF'
+==> sil6250d installed, module loaded, and service started.
+    Enroll a finger with: fprintd-enroll  (or GNOME/KDE Settings)
+    Needs the sil6250 kernel module (sil6250-dkms) and open-fprintd.
+EOF
+}
+
+post_upgrade() {
+  _load_module
+  _reload_dbus
+  systemctl daemon-reload 2>/dev/null || true
+  systemctl try-restart sil6250d.service 2>/dev/null || true
+}
+
+pre_remove() {
+  systemctl disable --now sil6250d.service 2>/dev/null || true
+}
+
+post_remove() {
+  _reload_dbus
+}

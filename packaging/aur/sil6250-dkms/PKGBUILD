@@ -1,0 +1,49 @@
+# Maintainer: Alexander Daichendt <claude@daichendt.one>
+#
+# DKMS package for the SIL6250 fingerprint kernel module (the mailbox broker
+# that exposes /dev/sil6250). Rebuilt automatically on every kernel upgrade by
+# the dkms pacman hook. The sil6250d daemon depends on this package.
+
+_pkgbase=sil6250
+pkgname=sil6250-dkms-git
+pkgver=0.1.0.r17.gd3fe97b
+pkgrel=1
+pkgdesc="Silead SIL6250 fingerprint reader kernel module (DKMS)"
+arch=('x86_64')
+url="https://github.com/AlexDaichendt/sil6250-linux"
+license=('GPL2')
+depends=('dkms')
+makedepends=('git')
+provides=("${_pkgbase}-dkms=${pkgver}")
+conflicts=("${_pkgbase}-dkms")
+source=("git+https://github.com/AlexDaichendt/sil6250-linux.git")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd "${srcdir}/sil6250-linux"
+  # 0.1.0.rNN.gHASH — NN commits since the start, short hash of HEAD.
+  printf '%s.r%s.g%s' \
+    "$(sed -n 's/^PACKAGE_VERSION="\(.*\)"/\1/p' kernel/dkms.conf)" \
+    "$(git rev-list --count HEAD)" \
+    "$(git rev-parse --short HEAD)"
+}
+
+package() {
+  cd "${srcdir}/sil6250-linux"
+  local dest="${pkgdir}/usr/src/${_pkgbase}-${pkgver}"
+
+  # Kernel module source + Makefile + dkms.conf go to /usr/src; the dkms
+  # alpm hook (shipped by the dkms package) builds + installs from here.
+  install -dm755 "${dest}"
+  install -m644 kernel/sil6250.c kernel/sil6250_uapi.h kernel/Makefile "${dest}/"
+
+  # The directory under /usr/src is named with the full VCS pkgver, so the
+  # PACKAGE_VERSION in dkms.conf must match or `dkms add` won't find it.
+  sed "s/^PACKAGE_VERSION=.*/PACKAGE_VERSION=\"${pkgver}\"/" \
+    kernel/dkms.conf > "${dest}/dkms.conf"
+
+  # udev rule: ACL the active session onto /dev/sil6250 (no sudo needed) and a
+  # 0660 root:users fallback for system services such as fprintd/sil6250d.
+  install -Dm644 kernel/60-sil6250.rules \
+    "${pkgdir}/usr/lib/udev/rules.d/60-sil6250.rules"
+}

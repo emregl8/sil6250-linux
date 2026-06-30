@@ -1,0 +1,8 @@
+# makepkg build dirs
+src/
+pkg/
+# VCS source checkout makepkg clones in
+sil6250-linux/
+# built packages
+*.pkg.tar.zst
+*.pkg.tar.*
