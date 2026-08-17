@@ -27,7 +27,12 @@ struct State {
 pub struct DeviceService {
     devpath: String,
     state: Arc<Mutex<State>>,
-    cancelled: Arc<AtomicBool>,
+    /// Cancellation flag of the operation currently running, if any.
+    current: Arc<Mutex<Option<Arc<AtomicBool>>>>,
+    /// Serializes access to the sensor. The engine drives a single MMIO mailbox
+    /// and one pair of strobe GPIOs, so two engines open on `/dev/sil6250` at
+    /// once corrupt each other's frames and no TLS handshake ever completes.
+    dev_lock: Arc<Mutex<()>>,
     resume_notify: Arc<Notify>,
 }
 
@@ -36,17 +41,35 @@ impl DeviceService {
         DeviceService {
             devpath,
             state: Arc::default(),
-            cancelled: Arc::new(AtomicBool::new(false)),
+            current: Arc::default(),
+            dev_lock: Arc::default(),
             resume_notify: Arc::new(Notify::new()),
         }
     }
 
-    fn reset_cancel(&self) {
-        self.cancelled.store(false, Ordering::Relaxed);
+    /// Cancel whatever is running and hand out a fresh flag for the operation
+    /// that is about to start.
+    ///
+    /// Every operation gets its OWN flag. A single shared flag meant a new
+    /// verify cleared the very flag the previous, still running, blocking
+    /// thread was watching, so that thread never observed its cancellation and
+    /// kept driving the sensor underneath its replacement.
+    async fn begin_op(&self) -> Arc<AtomicBool> {
+        let mut current = self.current.lock().await;
+
+        if let Some(previous) = current.take() {
+            previous.store(true, Ordering::Relaxed);
+        }
+
+        let token = Arc::new(AtomicBool::new(false));
+        *current = Some(Arc::clone(&token));
+        token
     }
 
-    fn do_cancel(&self) {
-        self.cancelled.store(true, Ordering::Relaxed);
+    async fn cancel_current(&self) {
+        if let Some(current) = self.current.lock().await.as_ref() {
+            current.store(true, Ordering::Relaxed);
+        }
     }
 }
 
@@ -86,44 +109,56 @@ impl DeviceService {
             return Err(zbus::fdo::Error::Failed("suspended".into()));
         }
 
-        self.reset_cancel();
+        let cancelled = self.begin_op().await;
+        let dev_lock = Arc::clone(&self.dev_lock);
 
         let devpath = self.devpath.clone();
         let username = username.to_owned();
         let finger_name = finger_name.to_owned();
         let emitter = emitter.to_owned();
-        let cancelled = Arc::clone(&self.cancelled);
 
         tokio::task::spawn(async move {
-            let result = tokio::task::spawn_blocking({
-                let cancelled = Arc::clone(&cancelled);
-                let emitter = emitter.clone();
-                let username = username.clone();
-                let finger_name = finger_name.clone();
-                move || enroll_blocking(&devpath, &username, &finger_name, &cancelled, emitter)
-            })
-            .await;
+            let (status, done) = {
+                // Wait for any previous engine to let go of the sensor.
+                let _device = dev_lock.lock().await;
 
-            match result {
-                Ok(Ok(())) => {
-                    let _ = DeviceService::enroll_status(&emitter, "enroll-completed", true).await;
+                if cancelled.load(Ordering::Relaxed) {
+                    tracing::debug!("enroll superseded before it reached the sensor");
+                    ("enroll-failed", true)
+                } else {
+                    let result = tokio::task::spawn_blocking({
+                        let cancelled = Arc::clone(&cancelled);
+                        let emitter = emitter.clone();
+                        let username = username.clone();
+                        let finger_name = finger_name.clone();
+                        move || {
+                            enroll_blocking(&devpath, &username, &finger_name, &cancelled, emitter)
+                        }
+                    })
+                    .await;
+
+                    match result {
+                        Ok(Ok(())) => ("enroll-completed", true),
+                        Ok(Err(e)) => {
+                            tracing::error!("enroll error: {e}");
+                            ("enroll-failed", true)
+                        }
+                        Err(e) => {
+                            tracing::error!("enroll task panicked: {e}");
+                            ("enroll-failed", true)
+                        }
+                    }
                 }
-                Ok(Err(e)) => {
-                    tracing::error!("enroll error: {e}");
-                    let _ = DeviceService::enroll_status(&emitter, "enroll-failed", true).await;
-                }
-                Err(e) => {
-                    tracing::error!("enroll task panicked: {e}");
-                    let _ = DeviceService::enroll_status(&emitter, "enroll-failed", true).await;
-                }
-            }
+            };
+
+            let _ = DeviceService::enroll_status(&emitter, status, done).await;
         });
 
         Ok(())
     }
 
     async fn enroll_stop(&self) -> zbus::fdo::Result<()> {
-        self.do_cancel();
+        self.cancel_current().await;
         Ok(())
     }
 
@@ -133,40 +168,55 @@ impl DeviceService {
         username: &str,
         finger_name: &str,
     ) -> zbus::fdo::Result<()> {
-        self.reset_cancel();
+        let cancelled = self.begin_op().await;
+        let dev_lock = Arc::clone(&self.dev_lock);
 
         let devpath = self.devpath.clone();
         let username = username.to_owned();
         let finger_name = finger_name.to_owned();
-        let cancelled = Arc::clone(&self.cancelled);
         let emitter = emitter.to_owned();
 
         tokio::task::spawn(async move {
-            let result = tokio::task::spawn_blocking({
-                let cancelled = Arc::clone(&cancelled);
-                let emitter = emitter.clone();
-                let username = username.clone();
-                let finger_name = finger_name.clone();
-                move || verify_blocking(&devpath, &username, &finger_name, &cancelled, emitter)
-            })
-            .await;
-
             // Only the terminal decision is emitted here; the non-terminal
             // "verify-retry-scan" signals for poor scans are emitted from inside
             // verify_blocking as the user re-presses, so any error returned here
             // is final and must complete the operation (done = true).
-            let (status, done) = match result {
-                Ok(Ok(true)) => ("verify-match", true),
-                Ok(Ok(false)) => ("verify-no-match", true),
-                Ok(Err(e)) => {
-                    tracing::warn!("verify error: {e}");
+            let (status, done) = {
+                // Wait for any previous engine to let go of the sensor.
+                let _device = dev_lock.lock().await;
+
+                if cancelled.load(Ordering::Relaxed) {
+                    // A newer verify owns the sensor now; opening a second
+                    // engine here is what used to wedge the handshake.
+                    tracing::debug!("verify superseded before it reached the sensor");
                     ("verify-no-match", true)
-                }
-                Err(e) => {
-                    tracing::error!("verify task panicked: {e}");
-                    ("verify-no-match", true)
+                } else {
+                    let result = tokio::task::spawn_blocking({
+                        let cancelled = Arc::clone(&cancelled);
+                        let emitter = emitter.clone();
+                        let username = username.clone();
+                        let finger_name = finger_name.clone();
+                        move || {
+                            verify_blocking(&devpath, &username, &finger_name, &cancelled, emitter)
+                        }
+                    })
+                    .await;
+
+                    match result {
+                        Ok(Ok(true)) => ("verify-match", true),
+                        Ok(Ok(false)) => ("verify-no-match", true),
+                        Ok(Err(e)) => {
+                            tracing::warn!("verify error: {e}");
+                            ("verify-no-match", true)
+                        }
+                        Err(e) => {
+                            tracing::error!("verify task panicked: {e}");
+                            ("verify-no-match", true)
+                        }
+                    }
                 }
             };
+
             let _ = DeviceService::verify_status(&emitter, status, done).await;
         });
 
@@ -174,18 +224,18 @@ impl DeviceService {
     }
 
     async fn verify_stop(&self) -> zbus::fdo::Result<()> {
-        self.do_cancel();
+        self.cancel_current().await;
         Ok(())
     }
 
     async fn cancel(&self) -> zbus::fdo::Result<()> {
-        self.do_cancel();
+        self.cancel_current().await;
         Ok(())
     }
 
     async fn suspend(&self) {
         self.state.lock().await.suspended = true;
-        self.do_cancel();
+        self.cancel_current().await;
     }
 
     async fn resume(&self) {
