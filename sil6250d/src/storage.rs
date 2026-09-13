@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use crate::engine::Features;
 
 const STORAGE_DIR: &str = "/var/lib/open-fprintd/sil6250";
+const MAX_ENROLLMENT_BYTES: u64 = 2 * 1024 * 1024;
 
 /// Ensure the storage root directory exists and is only accessible to root.
 pub fn init_storage() -> io::Result<()> {
@@ -60,28 +61,56 @@ pub fn save_features(username: &str, finger: &str, features: &[Features]) -> io:
         .recursive(true)
         .mode(0o700)
         .create(parent)?;
-    let mut f = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&path)?;
-    for feat in features {
-        let bytes = feat.serialize();
-        f.write_all(&(bytes.len() as u32).to_le_bytes())?;
-        f.write_all(&bytes)?;
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let tmp = parent.join(format!(".features.bin.{}.{}.tmp", std::process::id(), nonce));
+    let result = (|| {
+        let mut f = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&tmp)?;
+        for feat in features {
+            let bytes = feat.serialize();
+            f.write_all(&(bytes.len() as u32).to_le_bytes())?;
+            f.write_all(&bytes)?;
+        }
+        if f.metadata()?.len() > MAX_ENROLLMENT_BYTES {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "enrollment file too large"));
+        }
+        f.sync_all()?;
+        fs::rename(&tmp, &path)?;
+        std::fs::File::open(parent)?.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
     }
-    Ok(())
+    result
 }
 
 /// Load stored extracted feature sets. Returns an empty vec if nothing stored.
 pub fn load_features(username: &str, finger: &str) -> io::Result<Vec<Features>> {
     let path = finger_path(username, finger)?;
-    let mut f = match std::fs::File::open(&path) {
+    let mut f = match OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&path)
+    {
         Ok(f) => f,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(vec![]),
         Err(e) => return Err(e),
     };
+    let metadata = f.metadata()?;
+    if !metadata.file_type().is_file() {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "not a regular feature file"));
+    }
+    if metadata.len() > MAX_ENROLLMENT_BYTES {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "enrollment file too large"));
+    }
     let mut buf = Vec::new();
     f.read_to_end(&mut buf)?;
 
@@ -117,8 +146,11 @@ pub fn list_enrolled(username: &str) -> Vec<String> {
     rd.filter_map(|entry| {
         let entry = entry.ok()?;
         let name = entry.file_name().into_string().ok()?;
-        let features_path = entry.path().join("features.bin");
-        features_path.exists().then_some(name)
+        if !entry.file_type().ok()?.is_dir() {
+            return None;
+        }
+        let metadata = fs::symlink_metadata(entry.path().join("features.bin")).ok()?;
+        metadata.file_type().is_file().then_some(name)
     })
     .collect()
 }
@@ -131,4 +163,17 @@ pub fn delete_enrolled(username: &str) -> io::Result<()> {
         std::fs::remove_dir_all(&user_dir)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn path_components_cannot_escape_storage() {
+        for invalid in ["", ".", "..", "a/b", "a\0b"] {
+            assert!(check_component(invalid).is_err());
+        }
+        assert!(check_component("right-index-finger").is_ok());
+    }
 }

@@ -104,6 +104,18 @@ impl Features {
                 desc[i] = f32::from_le_bytes(bytes[off..off + 4].try_into().ok()?);
                 off += 4;
             }
+            if !x.is_finite()
+                || !y.is_finite()
+                || !scale.is_finite()
+                || !ori.is_finite()
+                || !resp.is_finite()
+                || !(0.0..PM_W as f32).contains(&x)
+                || !(0.0..PM_H as f32).contains(&y)
+                || scale <= 0.0
+                || desc.iter().any(|v| !v.is_finite())
+            {
+                return None;
+            }
             kp.push(Keypoint {
                 x,
                 y,
@@ -114,6 +126,26 @@ impl Features {
             });
         }
         Some(Features { kp })
+    }
+}
+
+#[cfg(test)]
+mod serialization_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_non_finite_feature_values() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"SILF");
+        bytes.extend_from_slice(&[1, 0, 0, 0]);
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&f32::NAN.to_le_bytes());
+        bytes.extend_from_slice(&1.0f32.to_le_bytes());
+        bytes.extend_from_slice(&1.0f32.to_le_bytes());
+        bytes.extend_from_slice(&0.0f32.to_le_bytes());
+        bytes.extend_from_slice(&1.0f32.to_le_bytes());
+        bytes.extend_from_slice(&[0u8; DESC_DIM * 4]);
+        assert!(Features::deserialize(&bytes).is_none());
     }
 }
 
@@ -346,7 +378,7 @@ fn compute_descriptor(gx: &[f32; PM_N], gy: &[f32; PM_N], kp: &mut Keypoint) {
     let cell = PS_MAGFAC * kp.scale;
     let ct = kp.ori.cos();
     let st = kp.ori.sin();
-    let radius = (cell * (PS_D as f32 + 1.0) * 0.5 * 1.41421356 + 0.5) as i32;
+    let radius = (cell * (PS_D as f32 + 1.0) * 0.5 * std::f32::consts::SQRT_2 + 0.5) as i32;
     let xi = (kp.x + 0.5) as i32;
     let yi = (kp.y + 0.5) as i32;
     let expden = 2.0 * (0.5 * PS_D as f32).powi(2);
