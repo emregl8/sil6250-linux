@@ -234,12 +234,15 @@ static long sil6250_wait_irq(struct sil6250 *s, u32 timeout_ms)
 	rc = mutex_lock_interruptible(&s->irq_lock);
 	if (rc)
 		return rc;
+	mutex_lock(&s->lifecycle_lock);
+	reinit_completion(&s->rx_irq);
 	if (READ_ONCE(s->removing)) {
+		mutex_unlock(&s->lifecycle_lock);
 		mutex_unlock(&s->irq_lock);
 		return -ENODEV;
 	}
+	mutex_unlock(&s->lifecycle_lock);
 
-	reinit_completion(&s->rx_irq);
 	/* Re-arm the level line. If the EC already staged a packet the line is
 	 * high and the IRQ fires immediately; otherwise we wait for assertion. */
 	if (READ_ONCE(s->irq_masked)) {
@@ -441,8 +444,8 @@ static void sil6250_remove(struct platform_device *pdev)
 	misc_deregister(&s->misc);
 	mutex_lock(&s->lifecycle_lock);
 	s->removing = true;
-	mutex_unlock(&s->lifecycle_lock);
 	complete_all(&s->rx_irq);
+	mutex_unlock(&s->lifecycle_lock);
 	mutex_lock(&s->irq_lock);
 	if (s->irq > 0 && !READ_ONCE(s->irq_masked)) {
 		disable_irq(s->irq);

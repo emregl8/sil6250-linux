@@ -46,8 +46,8 @@ stage_kernel() {
   fi
 
   log "Installing udev rule (/dev/sil6250 permissions)"
-  as_root install -Dm644 "$HERE/kernel/60-sil6250.rules" \
-    /etc/udev/rules.d/60-sil6250.rules
+  as_root install -Dm644 "$HERE/kernel/69-sil6250.rules" \
+    /etc/udev/rules.d/69-sil6250.rules
   as_root udevadm control --reload
 
   log "Loading the module"
