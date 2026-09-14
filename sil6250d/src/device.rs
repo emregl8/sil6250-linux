@@ -335,8 +335,8 @@ fn enroll_blocking(
         }
     }
 
-    if got < 2 {
-        anyhow::bail!("captured too few frames ({got})");
+    if got != ENROLL_STAGES {
+        anyhow::bail!("incomplete enrollment ({got}/{ENROLL_STAGES} frames)");
     }
 
     let kp_counts: Vec<usize> = kept_features.iter().map(|f| f.kp.len()).collect();

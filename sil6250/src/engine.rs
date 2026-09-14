@@ -4,7 +4,7 @@
 use std::io::{self, Read, Write};
 use std::ptr::NonNull;
 use std::thread::sleep;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use openssl::ssl::{HandshakeError, Ssl, SslContext, SslContextBuilder, SslMethod, SslStream,
                    SslVerifyMode, SslVersion};
@@ -74,6 +74,8 @@ const IMG_BULK0_LEN: u32 = 3109;
 const IMG_BULK0_RETRIES: u32 = 6;
 const IMG_CONT_RETRIES: u32 = 8;
 const CAPTURE_ATTEMPTS: u32 = 6;
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(60);
+const HANDSHAKE_MAX_WOULD_BLOCKS: usize = 64;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Phase {
@@ -396,19 +398,27 @@ fn build_ssl_context(key: [u8; 32]) -> io::Result<SslContext> {
     Ok(b.build())
 }
 
-fn do_accept(ssl: Ssl, bio: TransportBio) -> io::Result<SslStream<TransportBio>> {
+fn do_accept(
+    ssl: Ssl,
+    bio: TransportBio,
+    deadline: Instant,
+) -> io::Result<SslStream<TransportBio>> {
     let mut mid = match ssl.accept(bio) {
         Ok(s) => return Ok(s),
         Err(HandshakeError::WouldBlock(m)) => m,
         Err(e) => return Err(io::Error::new(io::ErrorKind::Other, format!("{e:?}"))),
     };
-    loop {
+    for _ in 0..HANDSHAKE_MAX_WOULD_BLOCKS {
+        if Instant::now() >= deadline {
+            return Err(io::Error::from(io::ErrorKind::TimedOut));
+        }
         mid = match mid.handshake() {
             Ok(s) => return Ok(s),
             Err(HandshakeError::WouldBlock(m)) => m,
             Err(e) => return Err(io::Error::new(io::ErrorKind::Other, format!("{e:?}"))),
         };
     }
+    Err(io::Error::from(io::ErrorKind::TimedOut))
 }
 
 // ---- public Engine ---------------------------------------------------------
@@ -479,7 +489,7 @@ impl Engine {
         self.session = None;
     }
 
-    fn session_handshake(&mut self, key_idx: usize) -> io::Result<()> {
+    fn session_handshake(&mut self, key_idx: usize, deadline: Instant) -> io::Result<()> {
         self.session = None;
         self.shared.session_key = key_idx;
         self.shared.phase = Phase::Handshake;
@@ -499,7 +509,7 @@ impl Engine {
         // SAFETY: shared is heap-allocated (Box) so the pointer is stable for the
         // lifetime of Engine. session is dropped before shared (field order).
         let ptr = unsafe { NonNull::new_unchecked(&mut *self.shared as *mut EngineShared) };
-        let stream = do_accept(ssl, TransportBio(ptr))?;
+        let stream = do_accept(ssl, TransportBio(ptr), deadline)?;
 
         if self.shared.verbose {
             eprintln!("[engine] *** HANDSHAKE OK ***");
@@ -512,11 +522,15 @@ impl Engine {
         if self.session.is_some() {
             return Ok(());
         }
+        let deadline = Instant::now() + HANDSHAKE_TIMEOUT;
         if let Some(k) = self.forced_key {
-            return self.session_handshake(k);
+            return self.session_handshake(k, deadline);
         }
         for k in 0..PSK_KEYS.len() {
-            if self.session_handshake(k).is_ok() {
+            if Instant::now() >= deadline {
+                return Err(io::Error::from(io::ErrorKind::TimedOut));
+            }
+            if self.session_handshake(k, deadline).is_ok() {
                 return Ok(());
             }
         }
