@@ -8,6 +8,10 @@ use crate::engine::Features;
 const STORAGE_DIR: &str = "/var/lib/open-fprintd/sil6250";
 const MAX_ENROLLMENT_BYTES: u64 = 2 * 1024 * 1024;
 
+fn checked_end(offset: usize, len: usize, total: usize) -> Option<usize> {
+    offset.checked_add(len).filter(|&end| end <= total)
+}
+
 /// Ensure the storage root directory exists and is only accessible to root.
 pub fn init_storage() -> io::Result<()> {
     DirBuilder::new()
@@ -95,7 +99,7 @@ pub fn save_features(username: &str, finger: &str, features: &[Features]) -> io:
 /// Load stored extracted feature sets. Returns an empty vec if nothing stored.
 pub fn load_features(username: &str, finger: &str) -> io::Result<Vec<Features>> {
     let path = finger_path(username, finger)?;
-    let mut f = match OpenOptions::new()
+    let f = match OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW)
         .open(&path)
@@ -112,24 +116,25 @@ pub fn load_features(username: &str, finger: &str) -> io::Result<Vec<Features>> 
         return Err(io::Error::new(io::ErrorKind::InvalidData, "enrollment file too large"));
     }
     let mut buf = Vec::new();
-    f.read_to_end(&mut buf)?;
+    f.take(MAX_ENROLLMENT_BYTES + 1).read_to_end(&mut buf)?;
+    if buf.len() as u64 > MAX_ENROLLMENT_BYTES {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "enrollment file too large"));
+    }
 
     let mut features = Vec::new();
     let mut off = 0usize;
     while off < buf.len() {
-        if off + 4 > buf.len() {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "truncated length"));
-        }
-        let len = u32::from_le_bytes(buf[off..off + 4].try_into().unwrap()) as usize;
-        off += 4;
-        if off + len > buf.len() {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "truncated features"));
-        }
-        let feat = Features::deserialize(&buf[off..off + len]).ok_or_else(|| {
+        let prefix_end = checked_end(off, 4, buf.len())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "truncated length"))?;
+        let len = u32::from_le_bytes(buf[off..prefix_end].try_into().unwrap()) as usize;
+        off = prefix_end;
+        let record_end = checked_end(off, len, buf.len())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "truncated features"))?;
+        let feat = Features::deserialize(&buf[off..record_end]).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidData, "invalid feature data")
         })?;
         features.push(feat);
-        off += len;
+        off = record_end;
     }
     Ok(features)
 }
@@ -175,5 +180,12 @@ mod tests {
             assert!(check_component(invalid).is_err());
         }
         assert!(check_component("right-index-finger").is_ok());
+    }
+
+    #[test]
+    fn record_offsets_cannot_overflow() {
+        assert_eq!(checked_end(4, 8, 12), Some(12));
+        assert_eq!(checked_end(usize::MAX, 1, usize::MAX), None);
+        assert_eq!(checked_end(8, 8, 12), None);
     }
 }

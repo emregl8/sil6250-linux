@@ -56,6 +56,7 @@ struct sil6250 {
 	struct mutex irq_lock;
 	atomic_t users;
 	wait_queue_head_t users_wait;
+	struct mutex lifecycle_lock;
 	bool removing;
 
 	struct miscdevice misc;
@@ -266,10 +267,14 @@ static int sil6250_open(struct inode *inode, struct file *file)
 	struct miscdevice *m = file->private_data;
 	struct sil6250 *s = container_of(m, struct sil6250, misc);
 
-	if (READ_ONCE(s->removing))
+	mutex_lock(&s->lifecycle_lock);
+	if (s->removing) {
+		mutex_unlock(&s->lifecycle_lock);
 		return -ENODEV;
+	}
 	atomic_inc(&s->users);
 	file->private_data = s;
+	mutex_unlock(&s->lifecycle_lock);
 	return 0;
 }
 
@@ -372,6 +377,7 @@ static int sil6250_probe(struct platform_device *pdev)
 	mutex_init(&s->irq_lock);
 	atomic_set(&s->users, 0);
 	init_waitqueue_head(&s->users_wait);
+	mutex_init(&s->lifecycle_lock);
 	s->irq_masked = true;
 	platform_set_drvdata(pdev, s);
 
@@ -433,7 +439,9 @@ static void sil6250_remove(struct platform_device *pdev)
 	struct sil6250 *s = platform_get_drvdata(pdev);
 
 	misc_deregister(&s->misc);
-	WRITE_ONCE(s->removing, true);
+	mutex_lock(&s->lifecycle_lock);
+	s->removing = true;
+	mutex_unlock(&s->lifecycle_lock);
 	complete_all(&s->rx_irq);
 	mutex_lock(&s->irq_lock);
 	if (s->irq > 0 && !READ_ONCE(s->irq_masked)) {
