@@ -280,7 +280,11 @@ impl PetaicDev {
         let tries = if tries == 0 { 1 } else { tries };
         for _ in 0..tries {
             if read_only {
-                self.wait_irq(timeout_ms)?;
+                match self.wait_irq(timeout_ms) {
+                    Ok(()) => {}
+                    Err(e) if e.raw_os_error() == Some(nix::libc::ETIMEDOUT) => continue,
+                    Err(e) => return Err(e),
+                }
                 self.shm_read(&mut rx[..read_len])?;
                 if Self::dead_window(&rx[..read_len]) {
                     continue;
