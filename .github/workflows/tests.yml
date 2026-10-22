@@ -25,6 +25,10 @@ jobs:
           cargo +stable clippy -p sil6250-ffi --all-targets --no-deps -- -D warnings
           python3 tests/test_install.py
       - run: ./install.sh build
+      - name: Check cleanup on one CPU
+        run: |
+          first_cpu="$(python3 -c 'import os; print(min(os.sched_getaffinity(0)))')"
+          taskset -c "$first_cpu" build/native/meson/tests/test-sil6250
       - run: |
           export FPRINTD="$(dpkg -L fprintd | sed -n '\|/fprintd$|p' | while read -r file; do if [ -f "$file" ] && [ -x "$file" ]; then printf '%s\n' "$file"; break; fi; done)"
           tests/run_permissions.sh

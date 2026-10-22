@@ -1,9 +1,9 @@
 diff --git a/libfprint/drivers/sil6250.c b/libfprint/drivers/sil6250.c
 new file mode 100644
-index 00000000..4aec092d
+index 00000000..135cb4c5
 --- /dev/null
 +++ b/libfprint/drivers/sil6250.c
-@@ -0,0 +1,554 @@
+@@ -0,0 +1,555 @@
 +/* SPDX-License-Identifier: LGPL-2.1-or-later */
 +
 +#define FP_COMPONENT "sil6250"
@@ -402,6 +402,7 @@ index 00000000..4aec092d
 +    }
 +
 +  operation_result_free (result);
++  g_task_set_task_data (task, NULL, NULL);
 +}
 +
 +static void
