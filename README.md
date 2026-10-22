@@ -13,6 +13,45 @@ reimplementation built from reverse engineering.
 > This repo was created with assistance from various LLMs. If you prefer your 
 > code to be written only by humans, please move on.
 
+## Experimental libfprint backend
+
+This branch also provides a C interface to the Rust engine and patches for
+standard libfprint/fprintd. It does not require open-fprintd on that path.
+The existing open-fprintd backend and installer remain available.
+
+Build and test into a local prefix as your regular user:
+
+```sh
+./integrations/libfprint/build.sh
+```
+
+This requires a current Rust toolchain, OpenSSL development files, Git,
+Make, C/C++ compilers, Meson, Ninja, pkg-config, GLib/GIO, libgusb, GUdev and
+libfprint's build dependencies. The script checks out the libfprint revision
+in `integrations/libfprint/revision`, applies the two patches, runs the C/C++
+ABI and Meson tests, and stages the libraries under `build/libfprint/prefix`.
+It does not install system libraries, change services, modify PAM or enroll
+fingerprints. The build selects SIL6250 and the virtual test drivers; other
+driver selections can be passed through `LIBFPRINT_DRIVERS` as an explicit
+comma-separated list. `BUILD_ROOT`, `CARGO` and `MESON` are also configurable.
+
+The bridge follows upstream's automatic PSK provisioning and accepts
+`SIL6250_PSK_MODE=auto|provision|replay|legacy` in fprintd's environment.
+Invalid values fail device initialization. See `sil6250-ffi/ABI` for ownership
+and error conventions. Enrollment uses fprintd's own storage; existing
+open-fprintd records are not automatically migrated. Matching thresholds
+remain unchanged, with up to three separate presses per verification.
+
+This is an experimental integration, not an automatic login-stack migration.
+Earlier isolated hardware, GNOME unlocking and reboot tests used the engine
+before upstream's PSK provisioning update. They do not establish hardware
+reliability of this updated branch or a general false-accept rate.
+
+Original license notices are preserved. The root license and engine headers
+give different licenses, and the engine depends on Apache-2.0 code. Clarify
+the applicable permissions before distributing a combined binary; the new
+interface's license does not relicense those components.
+
 ## Quick start
 
 Install [open-fprintd](https://github.com/uunicorn/open-fprintd) first (your
