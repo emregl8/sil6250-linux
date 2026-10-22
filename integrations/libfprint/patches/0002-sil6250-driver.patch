@@ -1,0 +1,1018 @@
+diff --git a/libfprint/drivers/sil6250.c b/libfprint/drivers/sil6250.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..c975d5e6da5a83e92431b8d90448456b01c0fe4f
+--- /dev/null
++++ b/libfprint/drivers/sil6250.c
+@@ -0,0 +1,521 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later */
++
++#define FP_COMPONENT "sil6250"
++
++#include "drivers_api.h"
++#include <sil6250_ffi.h>
++
++#include <fcntl.h>
++#include <unistd.h>
++
++#define ENROLL_STAGES 15
++#define QUALITY_MIN 0.52f
++#define MATCH_THRESHOLD 5
++#define MAX_REDUNDANT (ENROLL_STAGES * 4)
++#define VERIFY_SCANS 3
++#define VERIFY_RETRY_SECONDS 8
++
++typedef struct _FpiDeviceSil6250
++{
++  FpDevice parent;
++} FpiDeviceSil6250;
++
++typedef struct _FpiDeviceSil6250Class
++{
++  FpDeviceClass parent_class;
++} FpiDeviceSil6250Class;
++
++GType fpi_device_sil6250_get_type (void);
++
++G_DEFINE_TYPE (FpiDeviceSil6250, fpi_device_sil6250, FP_TYPE_DEVICE)
++
++typedef enum
++{
++  OP_ENROLL,
++  OP_VERIFY,
++  OP_IDENTIFY,
++} OperationKind;
++
++typedef struct
++{
++  OperationKind kind;
++  gchar *path;
++  GBytes *gallery;
++  GPtrArray *galleries;
++  GPtrArray *prints;
++} Operation;
++
++typedef struct
++{
++  GByteArray *gallery;
++  gboolean matched;
++  gint match_index;
++} OperationResult;
++
++typedef struct
++{
++  FpDevice *device;
++  guint stage;
++} Progress;
++
++typedef struct
++{
++  FpDevice *device;
++  FpiDeviceAction action;
++  FpFingerStatusFlags added;
++  FpFingerStatusFlags removed;
++} FingerStatus;
++
++static void
++operation_free (gpointer data)
++{
++  Operation *op = data;
++  g_clear_pointer (&op->path, g_free);
++  g_clear_pointer (&op->gallery, g_bytes_unref);
++  g_clear_pointer (&op->galleries, g_ptr_array_unref);
++  g_clear_pointer (&op->prints, g_ptr_array_unref);
++  g_free (op);
++}
++
++static void
++operation_result_free (gpointer data)
++{
++  OperationResult *result = data;
++  if (result == NULL)
++    return;
++  g_clear_pointer (&result->gallery, g_byte_array_unref);
++  g_free (result);
++}
++
++static gboolean
++report_progress (gpointer data)
++{
++  Progress *progress = data;
++  FpDevice *device = progress->device;
++
++  if (fpi_device_get_current_action (device) == FPI_DEVICE_ACTION_ENROLL &&
++      !fpi_device_action_is_cancelled (device))
++    fpi_device_enroll_progress (device, progress->stage, NULL, NULL);
++  return G_SOURCE_REMOVE;
++}
++
++static void
++progress_free (gpointer data)
++{
++  Progress *progress = data;
++  g_object_unref (progress->device);
++  g_free (progress);
++}
++
++static void
++queue_progress (GTask *task, guint stage)
++{
++  Progress *progress = g_new0 (Progress, 1);
++  progress->device = g_object_ref (g_task_get_source_object (task));
++  progress->stage = stage;
++  g_main_context_invoke_full (g_task_get_context (task), G_PRIORITY_DEFAULT,
++                              report_progress, progress, progress_free);
++}
++
++static gboolean
++report_finger_status (gpointer data)
++{
++  FingerStatus *status = data;
++  if (fpi_device_get_current_action (status->device) == status->action &&
++      !fpi_device_action_is_cancelled (status->device))
++    fpi_device_report_finger_status_changes (status->device,
++                                             status->added,
++                                             status->removed);
++  return G_SOURCE_REMOVE;
++}
++
++static void
++finger_status_free (gpointer data)
++{
++  FingerStatus *status = data;
++  g_object_unref (status->device);
++  g_free (status);
++}
++
++static void
++queue_finger_status (GTask *task, FpiDeviceAction action,
++                     FpFingerStatusFlags added, FpFingerStatusFlags removed)
++{
++  FingerStatus *status = g_new0 (FingerStatus, 1);
++  status->device = g_object_ref (g_task_get_source_object (task));
++  status->action = action;
++  status->added = added;
++  status->removed = removed;
++  g_main_context_invoke_full (g_task_get_context (task), G_PRIORITY_DEFAULT,
++                              report_finger_status, status, finger_status_free);
++}
++
++static void
++scan_worker (GTask *task, gpointer source, gpointer task_data, GCancellable *cancellable)
++{
++  Operation *op = task_data;
++  Sil6250Engine *engine;
++  OperationResult *result;
++  g_autoptr(GByteArray) kept_frames = NULL;
++  guint accepted = 0;
++  guint redundant = 0;
++  guint scanned = 0;
++  gint64 deadline;
++  gint64 retry_deadline;
++
++  (void) source;
++  engine = sil6250_engine_new (op->path);
++  if (engine == NULL)
++    {
++      g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_FAILED,
++                               "Could not open SIL6250 sensor");
++      return;
++    }
++
++  result = g_new0 (OperationResult, 1);
++  result->match_index = -1;
++  if (op->kind == OP_ENROLL)
++    {
++      result->gallery = g_byte_array_new ();
++      kept_frames = g_byte_array_new ();
++    }
++  deadline = g_get_monotonic_time () +
++             (op->kind == OP_ENROLL ? 300 : 45) * G_USEC_PER_SEC;
++  retry_deadline = deadline;
++
++  while (!g_cancellable_is_cancelled (cancellable) &&
++         g_get_monotonic_time () < deadline &&
++         g_get_monotonic_time () < retry_deadline)
++    {
++      guint8 raw[SIL6250_IMAGE_SIZE];
++      gint captured = sil6250_engine_capture (engine, 1000, raw, sizeof raw);
++      gfloat quality;
++
++      if (captured < 0)
++        {
++          g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_FAILED,
++                                   "SIL6250 capture failed");
++          goto out;
++        }
++      if (captured == 0)
++        continue;
++      if (g_cancellable_is_cancelled (cancellable))
++        break;
++
++      quality = sil6250_frame_quality (raw, sizeof raw);
++      if (quality < QUALITY_MIN)
++        {
++          sil6250_engine_wait_lift (engine, 4000);
++          continue;
++        }
++
++      if (op->kind != OP_ENROLL)
++        {
++          FpiDeviceAction action = op->kind == OP_VERIFY ?
++                                   FPI_DEVICE_ACTION_VERIFY : FPI_DEVICE_ACTION_IDENTIFY;
++          queue_finger_status (task, action, FP_FINGER_STATUS_PRESENT,
++                               FP_FINGER_STATUS_NEEDED);
++          guint count = op->kind == OP_VERIFY ? 1 : op->galleries->len;
++          for (guint i = 0; i < count; i++)
++            {
++              GBytes *bytes = op->kind == OP_VERIFY ? op->gallery :
++                              g_ptr_array_index (op->galleries, i);
++              gsize gallery_len;
++              const guint8 *gallery = g_bytes_get_data (bytes, &gallery_len);
++              gint score = sil6250_frame_score (raw, sizeof raw, gallery,
++                                                gallery_len);
++              fp_dbg ("scan quality %.3f, gallery %u score %d", quality, i, score);
++              if (score < 0)
++                {
++                  g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
++                                           "Invalid SIL6250 enrollment data");
++                  goto out;
++                }
++              if (score >= MATCH_THRESHOLD)
++                {
++                  result->matched = TRUE;
++                  result->match_index = (gint) i;
++                  break;
++                }
++            }
++          if (result->matched || ++scanned == VERIFY_SCANS ||
++              !sil6250_engine_wait_lift (engine, 4000))
++            {
++              g_task_return_pointer (task, result, operation_result_free);
++              result = NULL;
++              goto out;
++            }
++          queue_finger_status (task, action, FP_FINGER_STATUS_NEEDED,
++                               FP_FINGER_STATUS_PRESENT);
++          retry_deadline = MIN (deadline, g_get_monotonic_time () +
++                                         VERIFY_RETRY_SECONDS * G_USEC_PER_SEC);
++          continue;
++        }
++
++      gboolean duplicate = FALSE;
++      for (guint i = 0; i < accepted; i++)
++        {
++          const guint8 *prior = kept_frames->data + i * SIL6250_IMAGE_SIZE;
++          if (sil6250_frame_ncc (raw, prior, sizeof raw) > 0.85f)
++            {
++              duplicate = TRUE;
++              break;
++            }
++        }
++      if (duplicate)
++        {
++          if (++redundant >= MAX_REDUNDANT)
++            break;
++        }
++      else
++        {
++          guint8 feature[SIL6250_MAX_FEATURE_SIZE];
++          ssize_t feature_len = sil6250_frame_extract (raw, sizeof raw,
++                                                        feature, sizeof feature);
++          if (feature_len <= 0)
++            {
++              g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_FAILED,
++                                       "Could not extract SIL6250 features");
++              goto out;
++            }
++          guint32 size_le = GUINT32_TO_LE ((guint32) feature_len);
++          g_byte_array_append (result->gallery, (guint8 *) &size_le, sizeof size_le);
++          g_byte_array_append (result->gallery, feature, (guint) feature_len);
++          g_byte_array_append (kept_frames, raw, sizeof raw);
++          queue_progress (task, ++accepted);
++          if (accepted == ENROLL_STAGES)
++            {
++              sil6250_engine_wait_lift (engine, 4000);
++              g_task_return_pointer (task, result, operation_result_free);
++              result = NULL;
++              goto out;
++            }
++        }
++      sil6250_engine_wait_lift (engine, 4000);
++    }
++
++  if (g_cancellable_is_cancelled (cancellable))
++    g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_CANCELLED,
++                             "SIL6250 scan cancelled");
++  else if (scanned > 0)
++    {
++      g_task_return_pointer (task, result, operation_result_free);
++      result = NULL;
++    }
++  else
++    g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_TIMED_OUT,
++                             "SIL6250 scan timed out");
++
++out:
++  operation_result_free (result);
++  sil6250_engine_free (engine);
++}
++
++static void
++scan_done (GObject *source, GAsyncResult *async_result, gpointer user_data)
++{
++  FpDevice *device = FP_DEVICE (source);
++  GTask *task = G_TASK (async_result);
++  Operation *op = g_task_get_task_data (task);
++  g_autoptr(GError) error = NULL;
++  g_autoptr(GVariant) data = NULL;
++  OperationResult *result = g_task_propagate_pointer (task, &error);
++
++  (void) user_data;
++  if (fpi_device_action_is_cancelled (device) && error == NULL)
++    error = g_error_new_literal (G_IO_ERROR, G_IO_ERROR_CANCELLED,
++                                 "SIL6250 scan cancelled");
++
++  if (op->kind == OP_ENROLL)
++    {
++      if (error == NULL)
++        {
++          FpPrint *print;
++          fpi_device_get_enroll_data (device, &print);
++          fpi_print_set_type (print, FPI_PRINT_RAW);
++          data = g_variant_new_fixed_array (G_VARIANT_TYPE_BYTE,
++                                            result->gallery->data,
++                                            result->gallery->len, 1);
++          g_variant_ref_sink (data);
++          g_object_set (print, "fpi-data", data, NULL);
++          fpi_device_enroll_complete (device, g_object_ref (print), NULL);
++        }
++      else
++        fpi_device_enroll_complete (device, NULL, g_steal_pointer (&error));
++    }
++  else if (op->kind == OP_VERIFY)
++    {
++      if (error == NULL)
++        fpi_device_verify_report (device,
++                                  result->matched ? FPI_MATCH_SUCCESS : FPI_MATCH_FAIL,
++                                  NULL, NULL);
++      fpi_device_verify_complete (device, g_steal_pointer (&error));
++    }
++  else
++    {
++      if (error == NULL)
++        {
++          FpPrint *match = result->match_index < 0 ? NULL :
++                           g_ptr_array_index (op->prints, result->match_index);
++          fpi_device_identify_report (device, match, NULL, NULL);
++        }
++      fpi_device_identify_complete (device, g_steal_pointer (&error));
++    }
++
++  operation_result_free (result);
++}
++
++static void
++start_scan (FpDevice *device, OperationKind kind)
++{
++  Operation *op = g_new0 (Operation, 1);
++  GTask *task;
++  GPtrArray *prints = NULL;
++  op->kind = kind;
++  op->path = g_strdup (fpi_device_get_udev_data (device,
++                                                 FPI_DEVICE_UDEV_SUBTYPE_MISC));
++
++  if (kind != OP_ENROLL)
++    {
++      if (kind == OP_VERIFY)
++        {
++          FpPrint *print;
++          fpi_device_get_verify_data (device, &print);
++          prints = g_ptr_array_new ();
++          g_ptr_array_add (prints, print);
++        }
++      else
++        {
++          fpi_device_get_identify_data (device, &prints);
++          prints = g_ptr_array_ref (prints);
++        }
++      if (prints->len == 0)
++        {
++          g_ptr_array_unref (prints);
++          operation_free (op);
++          if (kind == OP_IDENTIFY)
++            {
++              fpi_device_identify_report (device, NULL, NULL, NULL);
++              fpi_device_identify_complete (device, NULL);
++            }
++          else
++            fpi_device_verify_complete (device,
++                                        fpi_device_error_new (FP_DEVICE_ERROR_DATA_INVALID));
++          return;
++        }
++      op->galleries = g_ptr_array_new_with_free_func ((GDestroyNotify) g_bytes_unref);
++      for (guint i = 0; i < prints->len; i++)
++        {
++          FpPrint *print = g_ptr_array_index (prints, i);
++          g_autoptr(GVariant) data = NULL;
++          gsize len = 0;
++          const guint8 *bytes;
++
++          g_object_get (print, "fpi-data", &data, NULL);
++          if (data == NULL || !g_variant_is_of_type (data, G_VARIANT_TYPE ("ay")))
++            goto invalid_data;
++          bytes = g_variant_get_fixed_array (data, &len, 1);
++          if (len == 0 || len > 2 * 1024 * 1024 ||
++              !sil6250_gallery_valid (bytes, len))
++            goto invalid_data;
++          g_ptr_array_add (op->galleries, g_bytes_new (bytes, len));
++        }
++      if (kind == OP_VERIFY)
++        {
++          op->gallery = g_bytes_ref (g_ptr_array_index (op->galleries, 0));
++          g_ptr_array_unref (prints);
++        }
++      else
++        op->prints = prints;
++    }
++
++  task = g_task_new (device, fpi_device_get_cancellable (device), scan_done, NULL);
++  g_task_set_check_cancellable (task, FALSE);
++  g_task_set_task_data (task, op, operation_free);
++  fpi_device_report_finger_status_changes (device, FP_FINGER_STATUS_NEEDED,
++                                           FP_FINGER_STATUS_NONE);
++  g_task_run_in_thread (task, scan_worker);
++  g_object_unref (task);
++  return;
++
++invalid_data:
++  g_ptr_array_unref (prints);
++  operation_free (op);
++  if (kind == OP_VERIFY)
++    fpi_device_verify_complete (device,
++                                fpi_device_error_new (FP_DEVICE_ERROR_DATA_INVALID));
++  else
++    fpi_device_identify_complete (device,
++                                  fpi_device_error_new (FP_DEVICE_ERROR_DATA_INVALID));
++}
++
++static void
++dev_open (FpDevice *device)
++{
++  const gchar *path = fpi_device_get_udev_data (device,
++                                                FPI_DEVICE_UDEV_SUBTYPE_MISC);
++  int fd = path ? open (path, O_RDWR | O_CLOEXEC) : -1;
++  if (fd < 0)
++    fpi_device_open_complete (device,
++                              fpi_device_error_new (FP_DEVICE_ERROR_GENERAL));
++  else
++    {
++      close (fd);
++      fpi_device_open_complete (device, NULL);
++    }
++}
++
++static void
++dev_close (FpDevice *device)
++{
++  fpi_device_close_complete (device, NULL);
++}
++
++static void
++dev_enroll (FpDevice *device)
++{
++  start_scan (device, OP_ENROLL);
++}
++
++static void
++dev_verify (FpDevice *device)
++{
++  start_scan (device, OP_VERIFY);
++}
++
++static void
++dev_identify (FpDevice *device)
++{
++  start_scan (device, OP_IDENTIFY);
++}
++
++static const FpIdEntry driver_ids[] = {
++  { .udev_types = FPI_DEVICE_UDEV_SUBTYPE_MISC,
++    .misc_name = "sil6250",
++    .misc_acpi_id = "SIL6250" },
++  { .udev_types = 0 },
++};
++
++static void
++fpi_device_sil6250_init (FpiDeviceSil6250 *self)
++{
++  (void) self;
++}
++
++static void
++fpi_device_sil6250_class_init (FpiDeviceSil6250Class *klass)
++{
++  FpDeviceClass *device_class = FP_DEVICE_CLASS (klass);
++  device_class->id = FP_COMPONENT;
++  device_class->full_name = "Silead SIL6250 Fingerprint Sensor";
++  device_class->type = FP_DEVICE_TYPE_UDEV;
++  device_class->id_table = driver_ids;
++  device_class->scan_type = FP_SCAN_TYPE_PRESS;
++  device_class->nr_enroll_stages = ENROLL_STAGES;
++  device_class->open = dev_open;
++  device_class->close = dev_close;
++  device_class->enroll = dev_enroll;
++  device_class->verify = dev_verify;
++  device_class->identify = dev_identify;
++  fpi_device_class_auto_initialize_features (device_class);
++}
+diff --git a/libfprint/meson.build b/libfprint/meson.build
+index f11533caba900b634b1581e20be6ee923e52ab04..f285c9ded8a871a7c38477fd2d82b6e29dc80871 100644
+--- a/libfprint/meson.build
++++ b/libfprint/meson.build
+@@ -122,6 +122,7 @@ driver_sources = {
+     'elan' : files('drivers/elan.c'),
+     'elanmoc' : files('drivers/elanmoc/elanmoc.c'),
+     'elanspi' : files('drivers/elanspi.c'),
++    'sil6250' : files('drivers/sil6250.c'),
+     'nb1010' : files('drivers/nb1010.c'),
+     'virtual_image' : files('drivers/virtual-image.c'),
+     'virtual_device' : files('drivers/virtual-device.c'),
+diff --git a/meson.build b/meson.build
+index ab09dc1d87c3706aed35d114cf5e9a794db19aa3..2413812d19311e5e5391ba6fc2b6c5f74aad0428 100644
+--- a/meson.build
++++ b/meson.build
+@@ -150,6 +150,7 @@ drivers_info = {
+ 
+     # SPI driver (non-optional if SPI is available)
+     'elanspi': { 'spi': true, 'helper': ['udev'], 'optional': not have_spi },
++    'sil6250': { 'helper': ['udev'], 'optional': true },
+ 
+     # Virtual drivers (test-only, optional)
+     'virtual_image': { 'virtual': true, 'helper': ['virtual'], 'optional': true },
+@@ -257,6 +258,10 @@ foreach i : driver_helpers
+     endif
+ endforeach
+ 
++if 'sil6250' in drivers
++    optional_deps += dependency('sil6250-ffi', version: '>= 0.1.0')
++endif
++
+ if udev_rules.disabled()
+     install_udev_rules = false
+ endif
+diff --git a/tests/meson.build b/tests/meson.build
+index d218e04d9a59bce48154ae41b61c6f335b463777..3e8df9af7239f253b5173eea392eb3dd8af3f6f3 100644
+--- a/tests/meson.build
++++ b/tests/meson.build
+@@ -309,6 +309,19 @@ test_utils = static_library('fprint-test-utils',
+     dependencies: libfprint_private_dep,
+     install: false)
+ 
++if 'sil6250' in drivers
++    sil6250_test = executable('test-sil6250',
++        sources: ['test-sil6250.c', '../libfprint/drivers/sil6250.c'],
++        dependencies: libfprint_private_dep,
++        install: false,
++    )
++    test('sil6250', sil6250_test,
++        suite: ['unit-tests'],
++        env: envs,
++        timeout: 15,
++    )
++endif
++
+ unit_tests = [
+     'fpi-device',
+     'fpi-ssm',
+diff --git a/tests/test-sil6250.c b/tests/test-sil6250.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..19153777b8b4a8cbf43776fe7241f80f70cdaddb
+--- /dev/null
++++ b/tests/test-sil6250.c
+@@ -0,0 +1,426 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later */
++
++#include "drivers_api.h"
++#include <sil6250_ffi.h>
++#include <string.h>
++
++GType fpi_device_sil6250_get_type (void);
++
++struct Sil6250Engine
++{
++  guint unused;
++};
++
++static struct
++{
++  gint opened;
++  gint freed;
++  gint captures;
++  gint lifts;
++  gint scores[4];
++  gfloat qualities[4];
++  gboolean open_error;
++  gboolean capture_error;
++  gboolean no_frame;
++  gboolean lift_error;
++  gboolean cancel_score;
++  gboolean cancel_extract;
++  guint match_gallery;
++  GCancellable *cancellable;
++} mock;
++
++static Sil6250Engine engine;
++
++Sil6250Engine *
++sil6250_engine_new (const char *path)
++{
++  g_assert_cmpstr (path, ==, "/dev/null");
++  g_atomic_int_inc (&mock.opened);
++  return mock.open_error ? NULL : &engine;
++}
++
++void
++sil6250_engine_free (Sil6250Engine *handle)
++{
++  g_assert_true (handle == &engine);
++  g_atomic_int_inc (&mock.freed);
++}
++
++int32_t
++sil6250_engine_capture (Sil6250Engine *handle, uint32_t timeout_ms,
++                       uint8_t *raw, size_t raw_len)
++{
++  gint index = g_atomic_int_add (&mock.captures, 1);
++  (void) timeout_ms;
++  g_assert_true (handle == &engine);
++  g_assert_cmpuint (raw_len, ==, SIL6250_IMAGE_SIZE);
++  if (mock.capture_error)
++    return -1;
++  if (mock.no_frame)
++    {
++      g_usleep (1000);
++      return 0;
++    }
++  memset (raw, MIN (index, 3), raw_len);
++  return 1;
++}
++
++bool
++sil6250_engine_wait_lift (Sil6250Engine *handle, uint32_t timeout_ms)
++{
++  (void) timeout_ms;
++  g_assert_true (handle == &engine);
++  g_atomic_int_inc (&mock.lifts);
++  return !mock.lift_error;
++}
++
++float
++sil6250_frame_quality (const uint8_t *raw, size_t raw_len)
++{
++  g_assert_cmpuint (raw_len, ==, SIL6250_IMAGE_SIZE);
++  return mock.qualities[raw[0]];
++}
++
++float
++sil6250_frame_ncc (const uint8_t *raw, const uint8_t *reference, size_t raw_len)
++{
++  (void) raw;
++  (void) reference;
++  (void) raw_len;
++  return 0.0f;
++}
++
++ssize_t
++sil6250_frame_extract (const uint8_t *raw, size_t raw_len,
++                      uint8_t *output, size_t capacity)
++{
++  (void) raw;
++  (void) raw_len;
++  g_assert_cmpuint (capacity, >=, 4);
++  memcpy (output, "TEST", 4);
++  if (mock.cancel_extract)
++    g_cancellable_cancel (mock.cancellable);
++  return 4;
++}
++
++bool
++sil6250_gallery_valid (const uint8_t *gallery, size_t gallery_len)
++{
++  return gallery_len == 8 && gallery[0] == 4;
++}
++
++int32_t
++sil6250_frame_score (const uint8_t *raw, size_t raw_len,
++                    const uint8_t *gallery, size_t gallery_len)
++{
++  g_assert_cmpuint (raw_len, ==, SIL6250_IMAGE_SIZE);
++  g_assert_true (sil6250_gallery_valid (gallery, gallery_len));
++  if (mock.cancel_score)
++    g_cancellable_cancel (mock.cancellable);
++  if (mock.match_gallery && gallery[7] != mock.match_gallery)
++    return 0;
++  return mock.scores[raw[0]];
++}
++
++typedef struct
++{
++  FpDevice *device;
++  FpPrint *print;
++  GCancellable *cancellable;
++} Fixture;
++
++static FpPrint *
++make_print (FpDevice *device, guint8 marker)
++{
++  const guint8 bytes[] = { 4, 0, 0, 0, 'T', 'E', 'S', marker };
++  g_autoptr(GVariant) data = g_variant_ref_sink (
++    g_variant_new_fixed_array (G_VARIANT_TYPE_BYTE, bytes, sizeof bytes, 1));
++  FpPrint *print = g_object_ref_sink (fp_print_new (device));
++  fpi_print_set_type (print, FPI_PRINT_RAW);
++  g_object_set (print, "fpi-data", data, NULL);
++  return print;
++}
++
++static void
++setup (Fixture *fixture, gconstpointer data)
++{
++  g_autoptr(GError) error = NULL;
++  (void) data;
++  memset (&mock, 0, sizeof mock);
++  for (guint i = 0; i < G_N_ELEMENTS (mock.scores); i++)
++    {
++      mock.scores[i] = 5;
++      mock.qualities[i] = 0.8f;
++    }
++  fixture->device = g_object_new (fpi_device_sil6250_get_type (),
++                                  "fpi-udev-data-misc", "/dev/null", NULL);
++  fixture->print = make_print (fixture->device, 1);
++  fixture->cancellable = g_cancellable_new ();
++  mock.cancellable = fixture->cancellable;
++  g_assert_true (fp_device_open_sync (fixture->device, NULL, &error));
++  g_assert_no_error (error);
++}
++
++static void
++teardown (Fixture *fixture, gconstpointer data)
++{
++  g_autoptr(GError) error = NULL;
++  (void) data;
++  g_assert_true (fp_device_close_sync (fixture->device, NULL, &error));
++  g_assert_no_error (error);
++  g_clear_object (&fixture->print);
++  g_clear_object (&fixture->device);
++  g_clear_object (&fixture->cancellable);
++}
++
++static gboolean
++verify (Fixture *fixture, gboolean *match, GError **error)
++{
++  return fp_device_verify_sync (fixture->device, fixture->print,
++                                fixture->cancellable, NULL, NULL, match, NULL, error);
++}
++
++static void
++test_verify_match (Fixture *fixture, gconstpointer data)
++{
++  g_autoptr(GError) error = NULL;
++  gboolean match = FALSE;
++  (void) data;
++  g_assert_true (verify (fixture, &match, &error));
++  g_assert_no_error (error);
++  g_assert_true (match);
++  g_assert_cmpint (mock.captures, ==, 1);
++  g_assert_cmpint (mock.freed, ==, 1);
++}
++
++static void
++test_verify_retries (Fixture *fixture, gconstpointer data)
++{
++  g_autoptr(GError) error = NULL;
++  gboolean match = FALSE;
++  (void) data;
++  mock.scores[0] = 0;
++  g_assert_true (verify (fixture, &match, &error));
++  g_assert_no_error (error);
++  g_assert_true (match);
++  g_assert_cmpint (mock.captures, ==, 2);
++  g_assert_cmpint (mock.lifts, ==, 1);
++}
++
++static void
++test_verify_rejects (Fixture *fixture, gconstpointer data)
++{
++  g_autoptr(GError) error = NULL;
++  gboolean match = TRUE;
++  (void) data;
++  memset (mock.scores, 0, sizeof mock.scores);
++  g_assert_true (verify (fixture, &match, &error));
++  g_assert_no_error (error);
++  g_assert_false (match);
++  g_assert_cmpint (mock.captures, ==, 3);
++  g_assert_cmpint (mock.lifts, ==, 2);
++}
++
++static void
++test_lift_timeout (Fixture *fixture, gconstpointer data)
++{
++  g_autoptr(GError) error = NULL;
++  gboolean match = TRUE;
++  (void) data;
++  mock.scores[0] = 0;
++  mock.lift_error = TRUE;
++  g_assert_true (verify (fixture, &match, &error));
++  g_assert_no_error (error);
++  g_assert_false (match);
++  g_assert_cmpint (mock.captures, ==, 1);
++}
++
++static void
++test_low_quality_retry (Fixture *fixture, gconstpointer data)
++{
++  g_autoptr(GError) error = NULL;
++  gboolean match = FALSE;
++  (void) data;
++  mock.qualities[0] = 0.1f;
++  g_assert_true (verify (fixture, &match, &error));
++  g_assert_no_error (error);
++  g_assert_true (match);
++  g_assert_cmpint (mock.captures, ==, 2);
++}
++
++static void
++test_invalid_gallery (Fixture *fixture, gconstpointer data)
++{
++  const guint8 bytes[] = { 0 };
++  g_autofree guint8 *oversized = g_malloc0 (2 * 1024 * 1024 + 1);
++  GVariant *values[] = {
++    g_variant_new_string ("invalid"),
++    g_variant_new_fixed_array (G_VARIANT_TYPE_BYTE, NULL, 0, 1),
++    g_variant_new_fixed_array (G_VARIANT_TYPE_BYTE, bytes, sizeof bytes, 1),
++    g_variant_new_fixed_array (G_VARIANT_TYPE_BYTE, oversized, 2 * 1024 * 1024 + 1, 1),
++  };
++  (void) data;
++  for (guint i = 0; i < G_N_ELEMENTS (values); i++)
++    {
++      g_autoptr(GVariant) value = g_variant_ref_sink (values[i]);
++      g_autoptr(GError) error = NULL;
++      gboolean match = TRUE;
++      g_object_set (fixture->print, "fpi-data", value, NULL);
++      g_assert_false (verify (fixture, &match, &error));
++      g_assert_error (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_DATA_INVALID);
++      g_assert_cmpint (mock.opened, ==, 0);
++    }
++}
++
++static void
++test_engine_open_error (Fixture *fixture, gconstpointer data)
++{
++  g_autoptr(GError) error = NULL;
++  gboolean match = TRUE;
++  (void) data;
++  mock.open_error = TRUE;
++  g_assert_false (verify (fixture, &match, &error));
++  g_assert_error (error, G_IO_ERROR, G_IO_ERROR_FAILED);
++  g_assert_cmpint (mock.opened, ==, 1);
++  g_assert_cmpint (mock.freed, ==, 0);
++}
++
++static void
++test_capture_error_recovery (Fixture *fixture, gconstpointer data)
++{
++  g_autoptr(GError) error = NULL;
++  gboolean match = TRUE;
++  (void) data;
++  mock.capture_error = TRUE;
++  g_assert_false (verify (fixture, &match, &error));
++  g_assert_error (error, G_IO_ERROR, G_IO_ERROR_FAILED);
++  g_assert_cmpint (mock.freed, ==, 1);
++  g_clear_error (&error);
++  mock.capture_error = FALSE;
++  g_assert_true (verify (fixture, &match, &error));
++  g_assert_no_error (error);
++  g_assert_true (match);
++  g_assert_cmpint (mock.freed, ==, 2);
++}
++
++static void
++test_cancelled_match (Fixture *fixture, gconstpointer data)
++{
++  g_autoptr(GError) error = NULL;
++  gboolean match = FALSE;
++  (void) data;
++  mock.cancel_score = TRUE;
++  g_assert_false (verify (fixture, &match, &error));
++  g_assert_error (error, G_IO_ERROR, G_IO_ERROR_CANCELLED);
++  g_assert_false (match);
++  g_assert_cmpint (mock.freed, ==, 1);
++}
++
++static gboolean
++cancel_scan (gpointer cancellable)
++{
++  g_cancellable_cancel (cancellable);
++  return G_SOURCE_REMOVE;
++}
++
++static void
++test_cancel_waiting (Fixture *fixture, gconstpointer data)
++{
++  g_autoptr(GError) error = NULL;
++  gboolean match = FALSE;
++  (void) data;
++  mock.no_frame = TRUE;
++  g_timeout_add (20, cancel_scan, fixture->cancellable);
++  g_assert_false (verify (fixture, &match, &error));
++  g_assert_error (error, G_IO_ERROR, G_IO_ERROR_CANCELLED);
++  g_assert_false (match);
++  g_assert_cmpint (mock.freed, ==, 1);
++}
++
++static void
++test_empty_identify (Fixture *fixture, gconstpointer data)
++{
++  g_autoptr(GPtrArray) prints = g_ptr_array_new ();
++  g_autoptr(GError) error = NULL;
++  g_autoptr(FpPrint) match = NULL;
++  (void) data;
++  g_assert_true (fp_device_identify_sync (fixture->device, prints, NULL,
++                                          NULL, NULL, &match, NULL, &error));
++  g_assert_no_error (error);
++  g_assert_null (match);
++  g_assert_cmpint (mock.opened, ==, 0);
++}
++
++static void
++test_identify_gallery_index (Fixture *fixture, gconstpointer data)
++{
++  g_autoptr(GPtrArray) prints = g_ptr_array_new ();
++  g_autoptr(FpPrint) second = make_print (fixture->device, 2);
++  g_autoptr(FpPrint) match = NULL;
++  g_autoptr(GError) error = NULL;
++  (void) data;
++  mock.match_gallery = 2;
++  g_ptr_array_add (prints, fixture->print);
++  g_ptr_array_add (prints, second);
++  g_assert_true (fp_device_identify_sync (fixture->device, prints, NULL,
++                                          NULL, NULL, &match, NULL, &error));
++  g_assert_no_error (error);
++  g_assert_true (match == second);
++}
++
++static void
++test_enroll (Fixture *fixture, gconstpointer data)
++{
++  g_autoptr(FpPrint) template = g_object_ref_sink (fp_print_new (fixture->device));
++  g_autoptr(FpPrint) print = NULL;
++  g_autoptr(GVariant) gallery = NULL;
++  g_autoptr(GError) error = NULL;
++  (void) data;
++  print = fp_device_enroll_sync (fixture->device, template, NULL,
++                                 NULL, NULL, &error);
++  g_assert_no_error (error);
++  g_assert_nonnull (print);
++  g_object_get (print, "fpi-data", &gallery, NULL);
++  g_assert_cmpuint (g_variant_get_size (gallery), ==, 15 * 8);
++  g_assert_cmpint (mock.captures, ==, 15);
++  g_assert_cmpint (mock.freed, ==, 1);
++}
++
++static void
++test_cancel_enroll (Fixture *fixture, gconstpointer data)
++{
++  g_autoptr(FpPrint) template = g_object_ref_sink (fp_print_new (fixture->device));
++  g_autoptr(FpPrint) print = NULL;
++  g_autoptr(GError) error = NULL;
++  (void) data;
++  mock.cancel_extract = TRUE;
++  print = fp_device_enroll_sync (fixture->device, template, fixture->cancellable,
++                                 NULL, NULL, &error);
++  g_assert_error (error, G_IO_ERROR, G_IO_ERROR_CANCELLED);
++  g_assert_null (print);
++  g_assert_cmpint (mock.freed, ==, 1);
++}
++
++int
++main (int argc, char **argv)
++{
++  g_test_init (&argc, &argv, NULL);
++#define ADD_TEST(name, function) \
++  g_test_add ("/sil6250/" name, Fixture, NULL, setup, function, teardown)
++  ADD_TEST ("verify/match", test_verify_match);
++  ADD_TEST ("verify/retry", test_verify_retries);
++  ADD_TEST ("verify/reject", test_verify_rejects);
++  ADD_TEST ("verify/lift-timeout", test_lift_timeout);
++  ADD_TEST ("verify/low-quality", test_low_quality_retry);
++  ADD_TEST ("verify/invalid-gallery", test_invalid_gallery);
++  ADD_TEST ("verify/open-error", test_engine_open_error);
++  ADD_TEST ("verify/error-recovery", test_capture_error_recovery);
++  ADD_TEST ("verify/cancel-match", test_cancelled_match);
++  ADD_TEST ("verify/cancel-waiting", test_cancel_waiting);
++  ADD_TEST ("identify/empty", test_empty_identify);
++  ADD_TEST ("identify/gallery-index", test_identify_gallery_index);
++  ADD_TEST ("enroll/complete", test_enroll);
++  ADD_TEST ("enroll/cancel", test_cancel_enroll);
++#undef ADD_TEST
++  return g_test_run ();
++}
