@@ -1,7 +1,7 @@
 # sil6250 — Rust library crate
 
 The userspace core of the SIL6250 stack — everything above the kernel broker.
-Builds as a regular Rust library (`lib`) and is used directly by `sil6250d`.
+Builds as a regular Rust library (`lib`) and is used by libfprint through `../sil6250-ffi`.
 
 | Module          | Responsibility                                                   |
 |-----------------|------------------------------------------------------------------|
@@ -24,7 +24,8 @@ cargo test               # offline matcher unit tests
 
 `examples/hsdiag.rs` is a hardware diagnostic: it runs only the prelude, PSK
 provisioning and TLS handshake (no finger needed) and prints everything the
-sensor answered. Stop `sil6250d` first, then as root:
+sensor answered. Run it only when no fingerprint service is using the sensor. It changes the
+sensor connection state and requires root:
 
 ```sh
 cargo build -p sil6250 --example hsdiag
@@ -32,4 +33,4 @@ sudo target/debug/examples/hsdiag /dev/sil6250 auto   # or provision | replay | 
 ```
 
 This crate is not published to crates.io; it is a workspace member of the
-top-level `Cargo.toml` consumed by `sil6250d`.
+top-level `Cargo.toml` consumed by `sil6250-ffi`.

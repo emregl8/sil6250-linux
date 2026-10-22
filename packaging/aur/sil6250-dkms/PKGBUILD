@@ -2,7 +2,7 @@
 #
 # DKMS package for the SIL6250 fingerprint kernel module (the mailbox broker
 # that exposes /dev/sil6250). Rebuilt automatically on every kernel upgrade by
-# the dkms pacman hook. The sil6250d daemon depends on this package.
+# the dkms pacman hook. Standard fprintd uses the module through libfprint.
 
 _pkgbase=sil6250
 pkgname=sil6250-dkms-git
@@ -10,14 +10,14 @@ pkgver=0.1.0.r17.gd3fe97b
 pkgrel=1
 pkgdesc="Silead SIL6250 fingerprint reader kernel module (DKMS)"
 arch=('x86_64')
-url="https://github.com/AlexDaichendt/sil6250-linux"
+url="https://github.com/emregl8/sil6250-linux"
 license=('GPL2')
 depends=('dkms')
 makedepends=('git')
 provides=("${_pkgbase}-dkms=${pkgver}")
 conflicts=("${_pkgbase}-dkms")
 install=sil6250-dkms.install
-source=("git+https://github.com/AlexDaichendt/sil6250-linux.git")
+source=("git+https://github.com/emregl8/sil6250-linux.git#branch=feat/libfprint-backend")
 sha256sums=('SKIP')
 
 pkgver() {

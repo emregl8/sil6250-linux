@@ -1,3 +1,7 @@
+> Historical implementation notes: references to `sil6250d` and open-fprintd
+> describe the original architecture. This fork now uses standard fprintd
+> through the Rust C interface and patched libfprint.
+
 # Reverse-Engineering the Silead SIL6250 / Petaic Fingerprint Sensor
 
 How this driver stack was built, end to end — from "Linux sees no fingerprint

@@ -1,31 +1,64 @@
 #!/usr/bin/env bash
-#
-# Build and install the SIL6250 fingerprint stack:
-#
-#   kernel  sil6250.ko broker + udev rule -> DKMS (or plain make)
-#   daemon  sil6250d open-fprintd backend -> cargo, systemd unit, D-Bus policy
-#
-# Stages run in the order above.  Pass stage names to run a subset, e.g.
-#
-#   ./install.sh kernel        # just the kernel module
-#   ./install.sh               # everything
-#   ./install.sh check         # report a stale installed/running daemon, no changes
-#
-# Environment:
-#   PREFIX  install prefix for sil6250d binary (default /usr/local)
-#   LLVM    forwarded to the kernel Makefile (set LLVM= for a gcc kernel)
-
 set -euo pipefail
 
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+BUILD_ROOT="${BUILD_ROOT:-$HERE/build/native}"
 PREFIX="${PREFIX:-/usr/local}"
+export BUILD_ROOT
 
-log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
-warn() { printf '\033[1;33m!!\033[0m %s\n' "$*" >&2; }
-die()  { printf '\033[1;31mxx\033[0m %s\n' "$*" >&2; exit 1; }
-
+log() { printf '%s\n' "$*"; }
+warn() { printf '%s\n' "$*" >&2; }
+die() { warn "$*"; exit 1; }
 as_root() {
-  if [ "$(id -u)" -eq 0 ]; then "$@"; else sudo "$@"; fi
+    if [[ $(id -u) == 0 ]]; then "$@"; else sudo "$@"; fi
+}
+
+stage_build() {
+    "$HERE/integrations/libfprint/build.sh"
+}
+
+stage_userspace() (
+    local stage_dir="${DESTDIR:-$BUILD_ROOT/stage}"
+    local built="$BUILD_ROOT/prefix/lib"
+    local library_dir="$PREFIX/lib/sil6250"
+    local temporary parent
+    [[ "$PREFIX" =~ ^/[A-Za-z0-9_./-]+$ ]] || die 'PREFIX must be a simple absolute path.'
+    [[ "/$PREFIX/" != *'/../'* ]] || die 'PREFIX must not contain parent-directory components.'
+    [[ $(readlink -m -- "$stage_dir") != / ]] || die 'DESTDIR must not be the filesystem root.'
+    [[ $(id -u) != 0 ]] || die 'Stage the userspace files as your regular user.'
+    [[ ! -e "$stage_dir" && ! -L "$stage_dir" ]] ||
+        die 'DESTDIR already exists; choose a fresh staging directory.'
+    [[ -f "$built/libfprint-2.so.2.0.0" && -f "$built/libsil6250_ffi.so.0" ]] ||
+        die 'Build the native libraries first: ./install.sh build'
+    stage_dir="$(readlink -m -- "$stage_dir")"
+    parent="$(dirname -- "$stage_dir")"
+    mkdir -p -- "$parent"
+    temporary="$(mktemp -d "$parent/.sil6250-stage.XXXXXXXX")"
+    trap 'rm -rf -- "$temporary"' EXIT
+    install -d "$temporary$library_dir" "$temporary/etc/systemd/system/fprintd.service.d"
+    install -m 0755 "$built/libfprint-2.so.2.0.0" "$temporary$library_dir/"
+    install -m 0755 "$built/libsil6250_ffi.so.0" "$temporary$library_dir/"
+    ln -sfn libfprint-2.so.2.0.0 "$temporary$library_dir/libfprint-2.so.2"
+    cat > "$temporary/etc/systemd/system/fprintd.service.d/60-sil6250.conf" <<EOF
+[Service]
+Environment=LD_LIBRARY_PATH=$library_dir
+DeviceAllow=/dev/sil6250 rw
+UMask=0077
+EOF
+    chmod 0644 "$temporary/etc/systemd/system/fprintd.service.d/60-sil6250.conf"
+    mv -T -- "$temporary" "$stage_dir"
+    log "Staged standard fprintd libraries and override under $stage_dir"
+    log 'No system files, services, PAM settings or enrollment records were changed.'
+)
+
+stage_check() {
+    systemctl show fprintd.service open-fprintd.service sil6250d.service \
+        -p Id -p LoadState -p FragmentPath -p ExecStart -p ActiveState
+    if systemctl is-active --quiet sil6250d.service ||
+       systemctl is-active --quiet open-fprintd.service; then
+        warn 'A legacy service name is active. Inspect its ExecStart before migrating.'
+    fi
+    [[ -c /dev/sil6250 ]] || warn 'The SIL6250 device node is not present.'
 }
 
 stage_kernel() {
@@ -67,50 +100,6 @@ stage_kernel() {
   as_root udevadm trigger -s misc || true
 }
 
-stage_daemon() {
-  # sil6250d is useless without open-fprintd: it registers the device with the
-  # open-fprintd manager over D-Bus. Without it the daemon starts but silently
-  # waits forever for the manager, and fprintd-enroll finds no device.
-  if ! systemctl cat open-fprintd.service >/dev/null 2>&1; then
-    warn "open-fprintd does not appear to be installed (no open-fprintd.service)."
-    warn "sil6250d registers with open-fprintd over D-Bus; without it fprintd-enroll"
-    warn "will find no device. Install open-fprintd first (see README), then re-run."
-  fi
-
-  log "Building sil6250d (open-fprintd Rust backend)"
-  cargo build --locked --release --manifest-path "$HERE/Cargo.toml" -p sil6250d
-
-  log "Installing sil6250d binary -> $PREFIX/bin/sil6250d"
-  as_root install -Dm755 "$HERE/target/release/sil6250d" "$PREFIX/bin/sil6250d"
-
-  log "Installing D-Bus policy -> /etc/dbus-1/system.d/"
-  as_root install -Dm644 "$HERE/sil6250d/io.github.uunicorn.Fprint.conf" \
-    /etc/dbus-1/system.d/io.github.uunicorn.Fprint.conf
-
-  # The bus must re-read its config before sil6250d may own its name; without
-  # this the daemon's first start fails with "Request to own name refused by
-  # policy" until the next dbus reload/reboot.
-  log "Reloading D-Bus to apply the new policy"
-  as_root systemctl reload dbus 2>/dev/null \
-    || as_root systemctl reload dbus-broker 2>/dev/null \
-    || warn "could not reload dbus; reboot or 'systemctl reload dbus' before starting sil6250d"
-
-  log "Installing systemd unit -> /etc/systemd/system/sil6250d.service"
-  local unit
-  unit="$(mktemp)"
-  sed "s|/usr/local/bin/sil6250d|$PREFIX/bin/sil6250d|" \
-    "$HERE/sil6250d/sil6250d.service" > "$unit"
-  as_root install -Dm644 "$unit" /etc/systemd/system/sil6250d.service
-  rm -f "$unit"
-
-  as_root systemctl daemon-reload
-  as_root systemctl enable sil6250d
-  as_root systemctl restart sil6250d || true
-}
-
-# True when UEFI Secure Boot is enabled, in which case DKMS must sign the module
-# with a MOK key enrolled in the firmware or modprobe will reject it. Best-effort:
-# prefer mokutil, fall back to reading the SecureBoot efivar (last byte 1 = on).
 secure_boot_enabled() {
   if command -v mokutil >/dev/null 2>&1; then
     mokutil --sb-state 2>/dev/null | grep -qi enabled
@@ -123,87 +112,23 @@ secure_boot_enabled() {
   [ "$last" = "1" ]
 }
 
-# Guards against the "stale daemon" trap: the running sil6250d can silently lag
-# the source after a `git pull` or local edit if the daemon stage is never re-run,
-# so the code you are reading is not the code that is executing. Reports two
-# independent mismatches (best-effort, never fatal):
-#   1. installed binary older than the source tree     -> rebuild  (./install.sh daemon)
-#   2. running service older than the installed binary  -> restart  (systemctl restart sil6250d)
-check_daemon_freshness() {
-  local bin="$PREFIX/bin/sil6250d"
-  [ -x "$bin" ] || { warn "No installed daemon at $bin yet (run ./install.sh daemon)."; return 0; }
-
-  local binmt
-  binmt="$(stat -c %Y "$bin" 2>/dev/null)" || return 0
-
-  # Newest mtime across daemon + library sources and the lockfiles. A git checkout
-  # stamps pulled files with the checkout time, so a post-pull tree reads newer
-  # than a binary built before the pull -- exactly the case we want to flag.
-  local newest
-  newest="$(find "$HERE/sil6250/src" "$HERE/sil6250d/src" \
-                 "$HERE/Cargo.toml" "$HERE/Cargo.lock" \
-                 "$HERE/sil6250/Cargo.toml" "$HERE/sil6250d/Cargo.toml" \
-                 -type f -printf '%T@\n' 2>/dev/null | sort -rn | head -1)"
-  if [ -n "$newest" ] && [ "${newest%.*}" -gt "$binmt" ]; then
-    warn "Installed daemon is OLDER than the source tree ($bin)."
-    warn "You likely pulled or edited without rebuilding; the running sil6250d is stale."
-    warn "Rebuild + reinstall:  ./install.sh daemon"
-  fi
-
-  # Running service started before the installed binary's mtime -> installed but
-  # never restarted, so the live process is executing the previous binary.
-  local started startmt
-  started="$(systemctl show sil6250d -p ExecMainStartTimestamp --value 2>/dev/null)"
-  if [ -n "$started" ]; then
-    startmt="$(date -d "$started" +%s 2>/dev/null || true)"
-    if [ -n "$startmt" ] && [ "$binmt" -gt "$startmt" ]; then
-      warn "Running sil6250d started BEFORE the installed binary was last updated."
-      warn "The live process is stale relative to $bin. Restart it:"
-      warn "    sudo systemctl restart sil6250d"
-    fi
-  fi
-}
-
-
 main() {
-  local stages=("$@")
-  [ ${#stages[@]} -eq 0 ] && stages=(kernel daemon)
-
-  # Diagnostics-only run: report daemon freshness and exit, with none of the
-  # install-completion messaging that assumes a kernel/daemon install happened.
-  if [ "${stages[*]}" = "check" ]; then
-    check_daemon_freshness
-    return
-  fi
-
-  for s in "${stages[@]}"; do
-    case "$s" in
-      kernel) stage_kernel ;;
-      daemon) stage_daemon ;;
-      check)  check_daemon_freshness ;;
-      *) die "unknown stage '$s' (kernel|daemon|check)" ;;
-    esac
-  done
-
-  # Enrollment only works once the whole stack is present: the kernel module
-  # exposes /dev/sil6250, and sil6250d ('daemon') registers the device with
-  # open-fprintd over D-Bus. A subset run (e.g. just 'kernel') leaves
-  # fprintd-enroll failing with NoSuchDevice, so don't imply it's ready.
-  local ran=" ${stages[*]} "
-  if [[ "$ran" == *" kernel "* && "$ran" == *" daemon "* ]]; then
-    log "Done. Enroll with: fprintd-enroll (or GNOME/KDE Settings)"
-  else
-    warn "Partial install (ran:${stages[*]})."
-    warn "fprintd-enroll needs the full stack — the device only registers after BOTH the"
-    warn "'kernel' and 'daemon' stages. Re-run ./install.sh with no arguments for everything."
-  fi
-
-  # Surface a stale running daemon when this run didn't already refresh it (the
-  # 'daemon' stage rebuilds+restarts, and 'check' has reported already).
-  case " ${stages[*]} " in
-    *" daemon "*|*" check "*) : ;;
-    *) check_daemon_freshness ;;
-  esac
+    local stages=("$@")
+    [[ ${#stages[@]} != 0 ]] || stages=(build)
+    for stage in "${stages[@]}"; do
+        case "$stage" in
+            build|kernel|stage|check) ;;
+            *) die "Unknown stage '$stage' (build|kernel|stage|check)." ;;
+        esac
+    done
+    for stage in "${stages[@]}"; do
+        case "$stage" in
+            build) stage_build ;;
+            kernel) stage_kernel ;;
+            stage) stage_userspace ;;
+            check) stage_check ;;
+        esac
+    done
 }
 
 main "$@"

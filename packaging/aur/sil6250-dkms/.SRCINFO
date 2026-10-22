@@ -2,7 +2,7 @@ pkgbase = sil6250-dkms-git
 	pkgdesc = Silead SIL6250 fingerprint reader kernel module (DKMS)
 	pkgver = 0.1.0
 	pkgrel = 1
-	url = https://github.com/AlexDaichendt/sil6250-linux
+	url = https://github.com/emregl8/sil6250-linux
 	arch = x86_64
 	license = GPL2
 	makedepends = git
@@ -10,7 +10,7 @@ pkgbase = sil6250-dkms-git
 	install = sil6250-dkms.install
 	provides = sil6250-dkms=0.1.0
 	conflicts = sil6250-dkms
-	source = git+https://github.com/AlexDaichendt/sil6250-linux.git
+	source = git+https://github.com/emregl8/sil6250-linux.git#branch=feat/libfprint-backend
 	sha256sums = SKIP
 
 pkgname = sil6250-dkms-git

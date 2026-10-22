@@ -1,175 +1,136 @@
 # SIL6250 fingerprint driver for Linux
 
-A complete Linux stack for the **Silead SIL6250 / Petaic** match-on-host
-fingerprint sensor (as found in the Huawei MateBook X Pro 2024), so it works
-with the normal desktop fingerprint experience: enrol in GNOME/KDE Settings, log
-in and `sudo` with your finger via PAM.
+This fork integrates the Silead SIL6250 / Petaic match-on-host sensor with
+standard fprintd through libfprint. The Rust engine handles the sensor's
+64×80 images, EC mailbox transport, TLS-PSK connection and matching. A C
+interface exposes that engine to the libfprint driver.
 
-The sensor is unusual: it is a 64×80 touch reader reached over an
-**EC-arbitrated shared-memory mailbox**, not USB or SPI, behind a TLS-PSK secure
-channel. There is no public driver. This repo is a clean, self-contained
-reimplementation built from reverse engineering.
+The standalone sil6250d/open-fprintd backend is no longer built or shipped.
+The distribution's fprintd provides authorization, device claiming and
+fingerprint storage. Desktop applications and PAM use its normal D-Bus API.
+This requires our libfprint patches; an unmodified distribution libfprint
+does not acquire SIL6250 support simply by installing fprintd.
 
-> This repo was created with assistance from various LLMs. If you prefer your 
+> This repo was created with assistance from various LLMs. If you prefer your
 > code to be written only by humans, please move on.
 
-## Experimental libfprint backend
+## Build and test
 
-This branch also provides a C interface to the Rust engine and patches for
-standard libfprint/fprintd. It does not require open-fprintd on that path.
-The existing open-fprintd backend and installer remain available.
-
-Build and test into a local prefix as your regular user:
-
-```sh
-./integrations/libfprint/build.sh
-```
-
-This requires a current Rust toolchain, OpenSSL development files, Git,
-Make, C/C++ compilers, Meson, Ninja, pkg-config, GLib/GIO, libgusb, GUdev and
-libfprint's build dependencies. The script checks out the libfprint revision
-in `integrations/libfprint/revision`, applies the two patches, runs the C/C++
-ABI and Meson tests, and stages the libraries under `build/libfprint/prefix`.
-It does not install system libraries, change services, modify PAM or enroll
-fingerprints. The build selects SIL6250 and the virtual test drivers; other
-driver selections can be passed through `LIBFPRINT_DRIVERS` as an explicit
-comma-separated list. `BUILD_ROOT`, `CARGO` and `MESON` are also configurable.
-
-The bridge follows upstream's automatic PSK provisioning and accepts
-`SIL6250_PSK_MODE=auto|provision|replay|legacy` in fprintd's environment.
-Invalid values fail device initialization. See `sil6250-ffi/ABI` for ownership
-and error conventions. Enrollment uses fprintd's own storage; existing
-open-fprintd records are not automatically migrated. Matching thresholds
-remain unchanged, with up to three separate presses per verification.
-
-This is an experimental integration, not an automatic login-stack migration.
-Earlier isolated hardware, GNOME unlocking and reboot tests used the engine
-before upstream's PSK provisioning update. They do not establish hardware
-reliability of this updated branch or a general false-accept rate.
-
-Original license notices are preserved. The root license and engine headers
-give different licenses, and the engine depends on Apache-2.0 code. Clarify
-the applicable permissions before distributing a combined binary; the new
-interface's license does not relicense those components.
-
-## Quick start
-
-Install [open-fprintd](https://github.com/uunicorn/open-fprintd) first (your
-distro may package it).
-
-```bash
-# Install it from the AUR
-paru -S open-fprintd
-# You are not on Arch; probably have to build it from source.
-git clone https://github.com/uunicorn/open-fprintd
-cd open-fprintd
-./setup.py install --force --install-layout deb --prefix=/usr --root=/
-```
-
-### Arch Linux (recommended): `makepkg`
-
-The stack is packaged as two `PKGBUILD`s under
-[`packaging/aur/`](packaging/aur/): `sil6250-dkms` (kernel module + udev rule,
-via DKMS) and `sil6250d` (the daemon, systemd unit, D-Bus policy). They are not
-on the AUR yet, so build them from this checkout. Build the DKMS package first —
-`sil6250d` depends on it:
+Use a current stable Rust toolchain, preferably through rustup. Build as your
+regular user. Requirements include Git, Make, C/C++ compilers, Meson, Ninja,
+pkg-config, OpenSSL development files and libfprint's GLib/GIO, libgusb,
+GUdev, pixman and cairo build dependencies.
 
 ```sh
-git clone https://github.com/AlexDaichendt/sil6250-linux.git
-cd sil6250-linux
-
-(cd packaging/aur/sil6250-dkms && makepkg -si)   # kernel module + udev rule
-(cd packaging/aur/sil6250d    && makepkg -si)    # daemon (pulls in open-fprintd)
-
-# The sil6250d package loads the module and enables+starts the service for you.
-# enroll a finger via CLI (or any GUI program — they all use fprintd underneath)
-fprintd-enroll
-```
-
-`makepkg -si` builds the package and installs it with `pacman`, so everything is
-tracked and uninstallable with `pacman -R sil6250d sil6250-dkms`. These are VCS
-(`-git`) packages that build from the current `main`. See
-[`packaging/aur/README.md`](packaging/aur/README.md) for details.
-
-### Other distros: `install.sh`
-
-Use an up-to-date stable Rust toolchain to build the daemon. The compiler
-packaged by your distribution may be too old for the locked dependencies;
-[rustup](https://rust-lang.org/tools/install/) is the recommended way to obtain
-a current toolchain. Run Cargo as your regular user; `install.sh` requests
-root privileges for system installation steps.
-
-```sh
-git clone https://github.com/AlexDaichendt/sil6250-linux.git
-cd sil6250-linux
-```
-
-If using rustup, select the stable toolchain for this checkout:
-
-```sh
-rustup toolchain install stable
-rustup override set stable
-```
-
-Build and install using the committed dependency versions in `Cargo.lock`:
-
-```sh
-# build + install everything (kernel module, sil6250d daemon)
-# Tested on CachyOS and Omarchy - in case it fails, you can easily install the components by hand.
-# Check the install.sh script what it is copying where.
 ./install.sh
-
-fprintd-enroll
 ```
 
-`install.sh` runs two stages — `kernel`, `daemon` — and you can run any subset,
-e.g. `./install.sh kernel`. It uses `sudo` only for steps that install
-system-wide. Override the install prefix with `PREFIX=/usr`.
+The default action builds and tests into `build/native/prefix`. It does not
+request root access, copy system files, change services, modify PAM or enroll
+fingerprints. It checks out the pinned revision in
+`integrations/libfprint/revision`, applies the driver patches and runs C/C++
+ABI and Meson tests. Missing device-replay dependencies can result in skipped
+tests; report those separately from passes.
 
+The driver selection is `default,sil6250`, preserving libfprint's other
+default drivers. For the complete virtual-driver test set, use
+`LIBFPRINT_DRIVERS=all,sil6250`. Explicit comma-separated driver lists also
+work. `BUILD_ROOT`, `CARGO` and `MESON` are configurable. When driver patches
+change, use a fresh `BUILD_ROOT` rather than discarding local source edits.
+
+Rust tests run independently:
+
+```sh
+cargo test --workspace --all-targets --locked
+python3 -m unittest discover -s tests
+```
+
+The bridge uses upstream's automatic PSK provisioning by default.
+`SIL6250_PSK_MODE=auto|provision|replay|legacy` can be set in fprintd's
+environment; invalid values fail engine initialization. See `sil6250-ffi/ABI`
+for ownership, error conventions and timeout limits. Verification allows up
+to three separate presses at the existing matching threshold. Descriptor
+pairs are evaluated once for both nearest-neighbor directions. The driver
+stops matching further reference samples after the unchanged acceptance
+threshold is met; malformed galleries are rejected before that check.
+
+## Prepare a system installation
+
+The userspace deployment requires the distribution's standard fprintd,
+PolicyKit policy and PAM integration. Keep its vendor service and D-Bus
+activation files. No replacement authentication daemon or policy is supplied
+by this fork.
+
+Build a staging tree without changing the running system:
+
+```sh
+./install.sh build stage
+```
+
+`stage` places the two runtime libraries and a standard `fprintd.service`
+override under `build/native/stage`. `PREFIX` defaults to `/usr/local`;
+`DESTDIR` changes the staging directory. This step never installs to `/`.
+It does not remove existing fingerprint services or records. Staging refuses
+an existing destination, including symbolic links. Files are assembled in a
+private temporary directory and renamed into place only after all copies
+succeed. For a subsequent staging run, choose a fresh `DESTDIR`.
+
+Before activating the libraries, finish an isolated hardware test of this
+revision, retain a working alternative login method, and back up the existing
+service configuration and enrollment storage. Only one implementation may
+own `net.reactivated.Fprint`. Remove or disable the legacy stack deliberately
+through its package manager; do not run both services on the sensor.
+
+For the default PREFIX, reviewed manual deployment consists of installing
+`libfprint-2.so.2.0.0` and `libsil6250_ffi.so.0` into
+`/usr/local/lib/sil6250`, adding the `libfprint-2.so.2` symlink and installing
+`60-sil6250.conf` into `/etc/systemd/system/fprintd.service.d/`. These files
+and every parent of the library directory must be root-owned and not writable
+by ordinary users. Preserve existing overrides for rollback. Reload systemd
+and restart standard fprintd only when ready to test authentication.
+
+The override selects these libraries for fprintd only and allows access to
+`/dev/sil6250`. It preserves the vendor's authorization and service settings.
+Other applications continue to use the distribution's installed libfprint.
+The override also applies an owner-only creation mask. Fingerprint records
+remain under `/var/lib/fprint`; the old standalone
+backend's records are not automatically converted or deleted. Enroll with
+`fprintd-enroll` after validating the new service.
+
+The kernel module can be installed separately with `./install.sh kernel`.
+This is an explicit system-changing step and requests sudo. DKMS and the
+headers for installed kernels are needed for automatic rebuilding. See
+`kernel/README.md` for compiler and Secure Boot requirements. The kernel udev
+rule keeps raw device access restricted to root.
+
+`./install.sh check` reports the standard service's executable and state
+without starting it. An old service name may still wrap a native fprintd
+installation; inspect ExecStart before deciding how to migrate it.
 
 ## Architecture
 
-```
-  GNOME/KDE Settings, PAM (sudo/login)
-            │  D-Bus
-          open-fprintd
-            │  io.github.uunicorn.Fprint.Device
-          sil6250d  (this repo, sil6250d/)   ← standalone Rust daemon
-            │ uses
-      ┌─────┴────────────────────────────────────┐
-      │  sil6250  (this repo, sil6250/)           │
-      │  • mailbox framing       (proto.rs)       │
-      │  • TLS-PSK + capture     (engine.rs)      │
-      │  • host matcher          (matcher/sift.rs)│
-      └─────┬────────────────────────────────────┘
-            │ /dev/sil6250  (mmap + ioctl)
-      sil6250.ko  (this repo, kernel/)   ← resource broker (C)
-            │ ACPI platform device "SIL6250"
-    hardware   EC mailbox window + GPIO strobes + IRQ
+```text
+GNOME / KDE / PAM
+       | D-Bus
+standard fprintd
+       | libfprint API
+patched libfprint SIL6250 driver
+       | C ABI
+sil6250-ffi -> Rust sil6250 engine
+       | mmap / ioctl
+sil6250.ko -> EC mailbox -> sensor
 ```
 
-Each layer is as thin as possible:
+`REVERSE_ENGINEERING_DETAILS.md` preserves the original protocol research.
+Its standalone-daemon architecture describes the historical implementation.
 
-- **`kernel/` — `sil6250.ko`**: a minimal C ACPI platform driver with *no
-  protocol logic*. It ioremaps the mailbox window and exposes it as
-  `/dev/sil6250` (`mmap` the window, `ioctl` for the GPIO strobes + IRQ wait).
-- **`sil6250/` — Rust library crate**: where all the real work lives — mailbox
-  framing, the TLS-PSK secure channel, the `0x11 → 0x37 → 0x38` capture loop,
-  and the host-side matcher (the sensor only streams raw images; the 3.2×4 mm
-  patch is too small for the NBIS minutiae pipeline). Independently usable as a
-  library; the matcher is a patent-free clean-room reimplementation.
-- **`sil6250d/` — Rust daemon**: implements the
-  `io.github.uunicorn.Fprint.Device` D-Bus interface and registers with
-  [open-fprintd](https://github.com/uunicorn/open-fprintd). Enrol/verify/identify
-  run as async D-Bus calls; the blocking sil6250 work runs on a thread pool.
-  Enrolled prints are stored in `/var/lib/open-fprintd/sil6250/`.
+## Validation limits
 
-## How it was built
-
-The sensor is undocumented and has no public driver; this stack was produced by
-reverse engineering. The full story — hardware identification, the EC mailbox
-transport, the TLS-PSK channel, and the clean-room reimplementation of the
-match-on-host algorithm — is in **`REVERSE_ENGINEERING_DETAILS.md`**.
+This remains an experimental integration. Earlier isolated verification,
+GNOME unlocking and reboot tests used the engine before upstream's recent
+PSK provisioning update. They do not establish hardware reliability of the
+updated branch. Suspend/resume and additional devices need separate testing;
+small samples do not establish a general false-accept rate.
 
 ## Credits
 
@@ -185,4 +146,8 @@ match-on-host algorithm — is in **`REVERSE_ENGINEERING_DETAILS.md`**.
 
 ## License
 
-LGPL-2.1 (see `LICENSE`).
+Original license and copyright notices are retained. The root LICENSE has
+LGPL-2.1 text, while the Rust engine carries GPL-2.0 notices and depends on
+Apache-2.0 code. Clarify the applicable permissions before distributing a
+combined binary. The C interface's LGPL-2.1-or-later license does not
+relicense the engine or grant a linking exception.

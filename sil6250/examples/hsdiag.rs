@@ -2,7 +2,6 @@
 //! Handshake diagnostic: prelude + PSK provisioning + TLS handshake, nothing
 //! else. No finger needed. Stop the daemon first, then run as root:
 //!
-//!   systemctl stop sil6250d
 //!   cargo build -p sil6250 --example hsdiag
 //!   sudo target/debug/examples/hsdiag /dev/sil6250 replay 2>&1 | tee hsdiag-replay.txt
 //!

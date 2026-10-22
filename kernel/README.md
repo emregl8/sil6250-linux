@@ -36,7 +36,7 @@ sudo dkms install sil6250/0.1.0
 ## Permissions
 
 Install `69-sil6250.rules` to `/etc/udev/rules.d/` to restrict `/dev/sil6250`
-to `root`. The root-owned `sil6250d` service is the intended consumer of the
-raw mailbox device; desktop applications communicate with it through
-open-fprintd instead of opening the device directly. Its filename also makes it
+to `root`. The root-owned standard `fprintd` service accesses the
+raw mailbox through the patched libfprint driver. Desktop applications use
+fprintd over D-Bus instead of opening the device directly. Its filename also makes it
 override the legacy `60-sil6250.rules` before systemd applies `uaccess` ACLs.

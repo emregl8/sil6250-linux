@@ -20,3 +20,4 @@ kernel/modules.order
 kernel/.tmp_versions/
 
 *.o
+__pycache__/
