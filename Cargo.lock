@@ -582,6 +582,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "sil6250-ffi"
+version = "0.1.0"
+dependencies = [
+ "sil6250",
+]
+
+[[package]]
 name = "sil6250d"
 version = "0.1.0"
 dependencies = [
