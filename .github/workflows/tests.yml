@@ -1,0 +1,67 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libssl-dev libgusb-dev libgudev-1.0-dev libpixman-1-dev meson ninja-build dbus python3-dbus python3-gi fprintd dpkg-dev
+          rustup toolchain install stable --profile minimal --component clippy
+      - run: |
+          cargo +stable test --workspace --locked
+          cargo +stable test --workspace --locked --release
+          cargo +stable clippy -p sil6250-ffi --all-targets --no-deps -- -D warnings
+          python3 tests/test_install.py
+      - run: ./install.sh build
+      - run: |
+          export FPRINTD="$(dpkg -L fprintd | sed -n '\|/fprintd$|p' | while read -r file; do if [ -f "$file" ] && [ -x "$file" ]; then printf '%s\n' "$file"; break; fi; done)"
+          tests/run_permissions.sh
+      - run: python3 packaging/debian/build.py --maintainer 'emregl8 <emregl246@outlook.com.tr>'
+      - run: |
+          meson configure build/native/meson -Db_sanitize=address,undefined -Db_lundef=false
+          meson compile -C build/native/meson
+          ASAN_OPTIONS=detect_leaks=0 meson test -C build/native/meson --suite unit-tests --print-errorlogs
+
+  dependencies:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - run: |
+          rustup toolchain install stable --profile minimal
+          cargo +stable install cargo-audit --locked
+          cargo +stable audit --deny warnings
+
+  fuzz:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [parsers, gallery, images]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libssl-dev
+          rustup toolchain install nightly --profile minimal
+          cargo +stable install cargo-fuzz --locked
+      - run: |
+          python3 tools/seed_fuzz.py
+          cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=30 -max_len=131072 -rss_limit_mb=1024

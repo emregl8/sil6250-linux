@@ -149,6 +149,12 @@ small samples do not establish a general false-accept rate.
   fprintd-compatible daemon that accepts out-of-tree device backends over D-Bus,
   making a standalone driver possible without patching libfprint.
 
+## Testing and packaging
+
+See [TESTING.md](TESTING.md) for isolated permission tests, fuzzing, hardware
+validation and local Debian package builds. These checks do not require changing
+PAM or replacing a working login service.
+
 ## License
 
 Original license and copyright notices are retained. The root LICENSE has
