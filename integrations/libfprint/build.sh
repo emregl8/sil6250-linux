@@ -8,7 +8,7 @@ if [[ $(id -u) == 0 ]]; then
     exit 1
 fi
 
-build_root="${BUILD_ROOT:-$repo/build/libfprint}"
+build_root="${BUILD_ROOT:-$repo/build/native}"
 mkdir -p -- "$build_root"
 build_root="$(cd -- "$build_root" && pwd)"
 source_dir="$build_root/source"
@@ -30,7 +30,7 @@ fi
 if git -C "$source_dir" apply --check "${patches[@]}" 2>/dev/null; then
     git -C "$source_dir" apply "${patches[@]}"
 elif ! git -C "$source_dir" apply --reverse --check "${patches[@]}"; then
-    printf '%s\n' 'The libfprint patches do not match the existing checkout.' >&2
+    printf '%s\n' 'The libfprint patches do not match the existing checkout. Use a fresh BUILD_ROOT after patch updates.' >&2
     exit 1
 fi
 
@@ -39,7 +39,8 @@ make -C "$repo/sil6250-ffi" check install PREFIX="$prefix" \
 export PKG_CONFIG_PATH="$prefix/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
 export LD_LIBRARY_PATH="$prefix/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 setup_args=(setup "$meson_build" "$source_dir" --prefix="$prefix"
-    --libdir=lib -Ddrivers="${LIBFPRINT_DRIVERS:-sil6250,virtual_image,virtual_device,virtual_device_storage}"
+    --libdir=lib --buildtype="${LIBFPRINT_BUILDTYPE:-release}"
+    -Ddrivers="${LIBFPRINT_DRIVERS:-default,sil6250}"
     -Dintrospection=false -Ddoc=false -Dinstalled-tests=false
     -Dudev_rules=disabled -Dudev_hwdb=disabled)
 if [[ -f "$meson_build/meson-private/coredata.dat" ]]; then

@@ -1,9 +1,9 @@
 diff --git a/libfprint/drivers/sil6250.c b/libfprint/drivers/sil6250.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..c975d5e6da5a83e92431b8d90448456b01c0fe4f
+index 00000000..4aec092d
 --- /dev/null
 +++ b/libfprint/drivers/sil6250.c
-@@ -0,0 +1,521 @@
+@@ -0,0 +1,554 @@
 +/* SPDX-License-Identifier: LGPL-2.1-or-later */
 +
 +#define FP_COMPONENT "sil6250"
@@ -12,7 +12,10 @@ index 0000000000000000000000000000000000000000..c975d5e6da5a83e92431b8d90448456b
 +#include <sil6250_ffi.h>
 +
 +#include <fcntl.h>
++#include <math.h>
 +#include <unistd.h>
++
++G_DEFINE_AUTOPTR_CLEANUP_FUNC (Sil6250Probe, sil6250_probe_free)
 +
 +#define ENROLL_STAGES 15
 +#define QUALITY_MIN 0.52f
@@ -46,7 +49,7 @@ index 0000000000000000000000000000000000000000..c975d5e6da5a83e92431b8d90448456b
 +{
 +  OperationKind kind;
 +  gchar *path;
-+  GBytes *gallery;
++  Sil6250Gallery *gallery;
 +  GPtrArray *galleries;
 +  GPtrArray *prints;
 +} Operation;
@@ -77,7 +80,6 @@ index 0000000000000000000000000000000000000000..c975d5e6da5a83e92431b8d90448456b
 +{
 +  Operation *op = data;
 +  g_clear_pointer (&op->path, g_free);
-+  g_clear_pointer (&op->gallery, g_bytes_unref);
 +  g_clear_pointer (&op->galleries, g_ptr_array_unref);
 +  g_clear_pointer (&op->prints, g_ptr_array_unref);
 +  g_free (op);
@@ -156,6 +158,12 @@ index 0000000000000000000000000000000000000000..c975d5e6da5a83e92431b8d90448456b
 +                              report_finger_status, status, finger_status_free);
 +}
 +
++static int32_t
++scan_cancelled (void *cancellable)
++{
++  return g_cancellable_is_cancelled (cancellable);
++}
++
 +static void
 +scan_worker (GTask *task, gpointer source, gpointer task_data, GCancellable *cancellable)
 +{
@@ -170,6 +178,8 @@ index 0000000000000000000000000000000000000000..c975d5e6da5a83e92431b8d90448456b
 +  gint64 retry_deadline;
 +
 +  (void) source;
++  deadline = g_get_monotonic_time () +
++             (op->kind == OP_ENROLL ? 300 : 45) * G_USEC_PER_SEC;
 +  engine = sil6250_engine_new (op->path);
 +  if (engine == NULL)
 +    {
@@ -178,6 +188,15 @@ index 0000000000000000000000000000000000000000..c975d5e6da5a83e92431b8d90448456b
 +      return;
 +    }
 +
++  if (!sil6250_engine_set_control (engine,
++                                    MAX (1, (deadline - g_get_monotonic_time ()) / 1000),
++                                    scan_cancelled, cancellable))
++    {
++      sil6250_engine_free (engine);
++      g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_FAILED,
++                               "Could not set SIL6250 operation deadline");
++      return;
++    }
 +  result = g_new0 (OperationResult, 1);
 +  result->match_index = -1;
 +  if (op->kind == OP_ENROLL)
@@ -185,8 +204,6 @@ index 0000000000000000000000000000000000000000..c975d5e6da5a83e92431b8d90448456b
 +      result->gallery = g_byte_array_new ();
 +      kept_frames = g_byte_array_new ();
 +    }
-+  deadline = g_get_monotonic_time () +
-+             (op->kind == OP_ENROLL ? 300 : 45) * G_USEC_PER_SEC;
 +  retry_deadline = deadline;
 +
 +  while (!g_cancellable_is_cancelled (cancellable) &&
@@ -197,6 +214,8 @@ index 0000000000000000000000000000000000000000..c975d5e6da5a83e92431b8d90448456b
 +      gint captured = sil6250_engine_capture (engine, 1000, raw, sizeof raw);
 +      gfloat quality;
 +
++      if (g_cancellable_is_cancelled (cancellable))
++        break;
 +      if (captured < 0)
 +        {
 +          g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_FAILED,
@@ -209,6 +228,12 @@ index 0000000000000000000000000000000000000000..c975d5e6da5a83e92431b8d90448456b
 +        break;
 +
 +      quality = sil6250_frame_quality (raw, sizeof raw);
++      if (!isfinite (quality) || quality < 0.0f || quality > 1.0f)
++        {
++          g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
++                                   "Invalid SIL6250 image quality");
++          goto out;
++        }
 +      if (quality < QUALITY_MIN)
 +        {
 +          sil6250_engine_wait_lift (engine, 4000);
@@ -221,29 +246,35 @@ index 0000000000000000000000000000000000000000..c975d5e6da5a83e92431b8d90448456b
 +                                   FPI_DEVICE_ACTION_VERIFY : FPI_DEVICE_ACTION_IDENTIFY;
 +          queue_finger_status (task, action, FP_FINGER_STATUS_PRESENT,
 +                               FP_FINGER_STATUS_NEEDED);
++          g_autoptr(Sil6250Probe) probe = sil6250_probe_new (raw, sizeof raw);
++          if (probe == NULL)
++            {
++              g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_FAILED,
++                                       "Could not extract SIL6250 probe");
++              goto out;
++            }
 +          guint count = op->kind == OP_VERIFY ? 1 : op->galleries->len;
 +          for (guint i = 0; i < count; i++)
 +            {
-+              GBytes *bytes = op->kind == OP_VERIFY ? op->gallery :
-+                              g_ptr_array_index (op->galleries, i);
-+              gsize gallery_len;
-+              const guint8 *gallery = g_bytes_get_data (bytes, &gallery_len);
-+              gint score = sil6250_frame_score (raw, sizeof raw, gallery,
-+                                                gallery_len);
-+              fp_dbg ("scan quality %.3f, gallery %u score %d", quality, i, score);
-+              if (score < 0)
++              Sil6250Gallery *gallery = op->kind == OP_VERIFY ? op->gallery :
++                                       g_ptr_array_index (op->galleries, i);
++              gint matched = sil6250_probe_matches (probe, gallery, MATCH_THRESHOLD);
++              fp_dbg ("scan quality %.3f, gallery %u match %d", quality, i, matched);
++              if (matched < 0)
 +                {
 +                  g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
 +                                           "Invalid SIL6250 enrollment data");
 +                  goto out;
 +                }
-+              if (score >= MATCH_THRESHOLD)
++              if (matched == 1)
 +                {
 +                  result->matched = TRUE;
 +                  result->match_index = (gint) i;
 +                  break;
 +                }
 +            }
++          if (g_cancellable_is_cancelled (cancellable) || g_get_monotonic_time () >= deadline)
++            break;
 +          if (result->matched || ++scanned == VERIFY_SCANS ||
 +              !sil6250_engine_wait_lift (engine, 4000))
 +            {
@@ -292,6 +323,8 @@ index 0000000000000000000000000000000000000000..c975d5e6da5a83e92431b8d90448456b
 +          if (accepted == ENROLL_STAGES)
 +            {
 +              sil6250_engine_wait_lift (engine, 4000);
++              if (g_cancellable_is_cancelled (cancellable) || g_get_monotonic_time () >= deadline)
++                break;
 +              g_task_return_pointer (task, result, operation_result_free);
 +              result = NULL;
 +              goto out;
@@ -303,7 +336,7 @@ index 0000000000000000000000000000000000000000..c975d5e6da5a83e92431b8d90448456b
 +  if (g_cancellable_is_cancelled (cancellable))
 +    g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_CANCELLED,
 +                             "SIL6250 scan cancelled");
-+  else if (scanned > 0)
++  else if (scanned > 0 && g_get_monotonic_time () < deadline)
 +    {
 +      g_task_return_pointer (task, result, operation_result_free);
 +      result = NULL;
@@ -409,7 +442,7 @@ index 0000000000000000000000000000000000000000..c975d5e6da5a83e92431b8d90448456b
 +                                        fpi_device_error_new (FP_DEVICE_ERROR_DATA_INVALID));
 +          return;
 +        }
-+      op->galleries = g_ptr_array_new_with_free_func ((GDestroyNotify) g_bytes_unref);
++      op->galleries = g_ptr_array_new_with_free_func ((GDestroyNotify) sil6250_gallery_free);
 +      for (guint i = 0; i < prints->len; i++)
 +        {
 +          FpPrint *print = g_ptr_array_index (prints, i);
@@ -421,14 +454,14 @@ index 0000000000000000000000000000000000000000..c975d5e6da5a83e92431b8d90448456b
 +          if (data == NULL || !g_variant_is_of_type (data, G_VARIANT_TYPE ("ay")))
 +            goto invalid_data;
 +          bytes = g_variant_get_fixed_array (data, &len, 1);
-+          if (len == 0 || len > 2 * 1024 * 1024 ||
-+              !sil6250_gallery_valid (bytes, len))
++          Sil6250Gallery *gallery = sil6250_gallery_new (bytes, len);
++          if (gallery == NULL)
 +            goto invalid_data;
-+          g_ptr_array_add (op->galleries, g_bytes_new (bytes, len));
++          g_ptr_array_add (op->galleries, gallery);
 +        }
 +      if (kind == OP_VERIFY)
 +        {
-+          op->gallery = g_bytes_ref (g_ptr_array_index (op->galleries, 0));
++          op->gallery = g_ptr_array_index (op->galleries, 0);
 +          g_ptr_array_unref (prints);
 +        }
 +      else
@@ -526,7 +559,7 @@ index 0000000000000000000000000000000000000000..c975d5e6da5a83e92431b8d90448456b
 +  fpi_device_class_auto_initialize_features (device_class);
 +}
 diff --git a/libfprint/meson.build b/libfprint/meson.build
-index f11533caba900b634b1581e20be6ee923e52ab04..f285c9ded8a871a7c38477fd2d82b6e29dc80871 100644
+index f11533ca..f285c9de 100644
 --- a/libfprint/meson.build
 +++ b/libfprint/meson.build
 @@ -122,6 +122,7 @@ driver_sources = {
@@ -538,7 +571,7 @@ index f11533caba900b634b1581e20be6ee923e52ab04..f285c9ded8a871a7c38477fd2d82b6e2
      'virtual_image' : files('drivers/virtual-image.c'),
      'virtual_device' : files('drivers/virtual-device.c'),
 diff --git a/meson.build b/meson.build
-index ab09dc1d87c3706aed35d114cf5e9a794db19aa3..2413812d19311e5e5391ba6fc2b6c5f74aad0428 100644
+index ab09dc1d..b12f1d7f 100644
 --- a/meson.build
 +++ b/meson.build
 @@ -150,6 +150,7 @@ drivers_info = {
@@ -549,19 +582,48 @@ index ab09dc1d87c3706aed35d114cf5e9a794db19aa3..2413812d19311e5e5391ba6fc2b6c5f7
  
      # Virtual drivers (test-only, optional)
      'virtual_image': { 'virtual': true, 'helper': ['virtual'], 'optional': true },
-@@ -257,6 +258,10 @@ foreach i : driver_helpers
+@@ -170,13 +171,21 @@ endforeach
+ 
+ all_drivers = default_drivers + virtual_drivers
+ 
+-if drivers == [ 'all' ]
+-    drivers = all_drivers
+-endif
+-
+-if drivers == [ 'default' ]
+-    drivers = default_drivers
+-endif
++requested_drivers = drivers
++drivers = []
++foreach requested_driver : requested_drivers
++    selected_drivers = [requested_driver]
++    if requested_driver == 'all'
++        selected_drivers = all_drivers
++    elif requested_driver == 'default'
++        selected_drivers = default_drivers
++    endif
++    foreach selected_driver : selected_drivers
++        if selected_driver not in drivers
++            drivers += selected_driver
++        endif
++    endforeach
++endforeach
+ 
+ if not have_spi
+     foreach driver: drivers
+@@ -257,6 +266,10 @@ foreach i : driver_helpers
      endif
  endforeach
  
 +if 'sil6250' in drivers
-+    optional_deps += dependency('sil6250-ffi', version: '>= 0.1.0')
++    optional_deps += dependency('sil6250-ffi', version: '>= 0.2.0')
 +endif
 +
  if udev_rules.disabled()
      install_udev_rules = false
  endif
 diff --git a/tests/meson.build b/tests/meson.build
-index d218e04d9a59bce48154ae41b61c6f335b463777..3e8df9af7239f253b5173eea392eb3dd8af3f6f3 100644
+index d218e04d..3e8df9af 100644
 --- a/tests/meson.build
 +++ b/tests/meson.build
 @@ -309,6 +309,19 @@ test_utils = static_library('fprint-test-utils',
@@ -586,15 +648,16 @@ index d218e04d9a59bce48154ae41b61c6f335b463777..3e8df9af7239f253b5173eea392eb3dd
      'fpi-ssm',
 diff --git a/tests/test-sil6250.c b/tests/test-sil6250.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..19153777b8b4a8cbf43776fe7241f80f70cdaddb
+index 00000000..34f565f3
 --- /dev/null
 +++ b/tests/test-sil6250.c
-@@ -0,0 +1,426 @@
+@@ -0,0 +1,563 @@
 +/* SPDX-License-Identifier: LGPL-2.1-or-later */
 +
 +#include "drivers_api.h"
 +#include <sil6250_ffi.h>
 +#include <string.h>
++#include <math.h>
 +
 +GType fpi_device_sil6250_get_type (void);
 +
@@ -608,6 +671,10 @@ index 0000000000000000000000000000000000000000..19153777b8b4a8cbf43776fe7241f80f
 +  gint opened;
 +  gint freed;
 +  gint captures;
++  gint preparations;
++  gint extractions;
++  gint galleries_freed;
++  gint probes_freed;
 +  gint lifts;
 +  gint scores[4];
 +  gfloat qualities[4];
@@ -616,10 +683,16 @@ index 0000000000000000000000000000000000000000..19153777b8b4a8cbf43776fe7241f80f
 +  gboolean no_frame;
 +  gboolean lift_error;
 +  gboolean cancel_score;
++  Sil6250Cancelled cancelled;
++  void *cancel_data;
++  gboolean wait_control;
 +  gboolean cancel_extract;
 +  guint match_gallery;
 +  GCancellable *cancellable;
 +} mock;
++
++struct Sil6250Gallery { guint8 bytes[8]; };
++struct Sil6250Probe { guint8 raw[SIL6250_IMAGE_SIZE]; };
 +
 +static Sil6250Engine engine;
 +
@@ -629,6 +702,20 @@ index 0000000000000000000000000000000000000000..19153777b8b4a8cbf43776fe7241f80f
 +  g_assert_cmpstr (path, ==, "/dev/null");
 +  g_atomic_int_inc (&mock.opened);
 +  return mock.open_error ? NULL : &engine;
++}
++
++bool
++sil6250_engine_set_control (Sil6250Engine *handle, uint32_t timeout_ms,
++                            Sil6250Cancelled cancelled, void *user_data)
++{
++  g_assert_true (handle == &engine);
++  g_assert_cmpuint (timeout_ms, >, 0);
++  g_assert_cmpuint (timeout_ms, <=, 300000);
++  g_assert_nonnull (cancelled);
++  g_assert_true (G_IS_CANCELLABLE (user_data));
++  mock.cancelled = cancelled;
++  mock.cancel_data = user_data;
++  return true;
 +}
 +
 +void
@@ -646,6 +733,12 @@ index 0000000000000000000000000000000000000000..19153777b8b4a8cbf43776fe7241f80f
 +  (void) timeout_ms;
 +  g_assert_true (handle == &engine);
 +  g_assert_cmpuint (raw_len, ==, SIL6250_IMAGE_SIZE);
++  if (mock.wait_control)
++    {
++      while (!mock.cancelled (mock.cancel_data))
++        g_usleep (1000);
++      return -1;
++    }
 +  if (mock.capture_error)
 +    return -1;
 +  if (mock.no_frame)
@@ -714,6 +807,58 @@ index 0000000000000000000000000000000000000000..19153777b8b4a8cbf43776fe7241f80f
 +  return mock.scores[raw[0]];
 +}
 +
++int32_t
++sil6250_frame_matches (const uint8_t *raw, size_t raw_len,
++                      const uint8_t *gallery, size_t gallery_len,
++                      int32_t threshold)
++{
++  gint score = sil6250_frame_score (raw, raw_len, gallery, gallery_len);
++  g_assert_cmpint (threshold, ==, 5);
++  return score < 0 ? -1 : score >= threshold;
++}
++
++Sil6250Gallery *
++sil6250_gallery_new (const uint8_t *bytes, size_t len)
++{
++  if (!sil6250_gallery_valid (bytes, len))
++    return NULL;
++  Sil6250Gallery *gallery = g_new0 (Sil6250Gallery, 1);
++  memcpy (gallery->bytes, bytes, len);
++  g_atomic_int_inc (&mock.preparations);
++  return gallery;
++}
++
++void
++sil6250_gallery_free (Sil6250Gallery *gallery)
++{
++  g_atomic_int_inc (&mock.galleries_freed);
++  g_free (gallery);
++}
++
++Sil6250Probe *
++sil6250_probe_new (const uint8_t *raw, size_t len)
++{
++  g_assert_cmpuint (len, ==, SIL6250_IMAGE_SIZE);
++  Sil6250Probe *probe = g_new0 (Sil6250Probe, 1);
++  memcpy (probe->raw, raw, len);
++  g_atomic_int_inc (&mock.extractions);
++  return probe;
++}
++
++void
++sil6250_probe_free (Sil6250Probe *probe)
++{
++  g_atomic_int_inc (&mock.probes_freed);
++  g_free (probe);
++}
++
++int32_t
++sil6250_probe_matches (const Sil6250Probe *probe, const Sil6250Gallery *gallery, int32_t threshold)
++{
++  return sil6250_frame_matches (probe->raw, sizeof probe->raw,
++                                gallery->bytes, sizeof gallery->bytes, threshold);
++}
++
 +typedef struct
 +{
 +  FpDevice *device;
@@ -763,6 +908,8 @@ index 0000000000000000000000000000000000000000..19153777b8b4a8cbf43776fe7241f80f
 +  g_clear_object (&fixture->print);
 +  g_clear_object (&fixture->device);
 +  g_clear_object (&fixture->cancellable);
++  g_assert_cmpint (mock.preparations, ==, mock.galleries_freed);
++  g_assert_cmpint (mock.extractions, ==, mock.probes_freed);
 +}
 +
 +static gboolean
@@ -838,6 +985,37 @@ index 0000000000000000000000000000000000000000..19153777b8b4a8cbf43776fe7241f80f
 +  g_assert_no_error (error);
 +  g_assert_true (match);
 +  g_assert_cmpint (mock.captures, ==, 2);
++}
++
++static void
++test_invalid_quality (Fixture *fixture, gconstpointer data)
++{
++  const gfloat qualities[] = { NAN, INFINITY, -1.0f, 1.1f };
++  (void) data;
++  for (guint i = 0; i < G_N_ELEMENTS (qualities); i++)
++    {
++      g_autoptr(GError) error = NULL;
++      gboolean match = FALSE;
++      for (guint j = 0; j < G_N_ELEMENTS (mock.qualities); j++)
++        mock.qualities[j] = qualities[i];
++      g_assert_false (verify (fixture, &match, &error));
++      g_assert_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA);
++      g_assert_false (match);
++      g_assert_cmpint (mock.freed, ==, i + 1);
++    }
++}
++
++static void
++test_matching_error (Fixture *fixture, gconstpointer data)
++{
++  g_autoptr(GError) error = NULL;
++  gboolean match = FALSE;
++  (void) data;
++  mock.scores[0] = -1;
++  g_assert_false (verify (fixture, &match, &error));
++  g_assert_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA);
++  g_assert_false (match);
++  g_assert_cmpint (mock.freed, ==, 1);
 +}
 +
 +static void
@@ -930,6 +1108,22 @@ index 0000000000000000000000000000000000000000..19153777b8b4a8cbf43776fe7241f80f
 +}
 +
 +static void
++test_cancel_capture (Fixture *fixture, gconstpointer data)
++{
++  g_autoptr(GError) error = NULL;
++  gboolean match = FALSE;
++  gint64 start = g_get_monotonic_time ();
++  (void) data;
++  mock.wait_control = TRUE;
++  g_timeout_add (20, cancel_scan, fixture->cancellable);
++  g_assert_false (verify (fixture, &match, &error));
++  g_assert_error (error, G_IO_ERROR, G_IO_ERROR_CANCELLED);
++  g_assert_false (match);
++  g_assert_cmpint (g_get_monotonic_time () - start, <, G_USEC_PER_SEC);
++  g_assert_cmpint (mock.freed, ==, 1);
++}
++
++static void
 +test_empty_identify (Fixture *fixture, gconstpointer data)
 +{
 +  g_autoptr(GPtrArray) prints = g_ptr_array_new ();
@@ -958,6 +1152,8 @@ index 0000000000000000000000000000000000000000..19153777b8b4a8cbf43776fe7241f80f
 +                                          NULL, NULL, &match, NULL, &error));
 +  g_assert_no_error (error);
 +  g_assert_true (match == second);
++  g_assert_cmpint (mock.extractions, ==, 1);
++  g_assert_cmpint (mock.preparations, ==, 2);
 +}
 +
 +static void
@@ -1005,10 +1201,13 @@ index 0000000000000000000000000000000000000000..19153777b8b4a8cbf43776fe7241f80f
 +  ADD_TEST ("verify/lift-timeout", test_lift_timeout);
 +  ADD_TEST ("verify/low-quality", test_low_quality_retry);
 +  ADD_TEST ("verify/invalid-gallery", test_invalid_gallery);
++  ADD_TEST ("verify/invalid-quality", test_invalid_quality);
++  ADD_TEST ("verify/matching-error", test_matching_error);
 +  ADD_TEST ("verify/open-error", test_engine_open_error);
 +  ADD_TEST ("verify/error-recovery", test_capture_error_recovery);
 +  ADD_TEST ("verify/cancel-match", test_cancelled_match);
 +  ADD_TEST ("verify/cancel-waiting", test_cancel_waiting);
++  ADD_TEST ("verify/cancel-capture", test_cancel_capture);
 +  ADD_TEST ("identify/empty", test_empty_identify);
 +  ADD_TEST ("identify/gallery-index", test_identify_gallery_index);
 +  ADD_TEST ("enroll/complete", test_enroll);

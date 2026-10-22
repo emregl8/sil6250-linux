@@ -4,7 +4,6 @@
 use std::io::{self, Read, Write};
 use std::ptr::NonNull;
 use std::str::FromStr;
-use std::thread::sleep;
 use std::time::{Duration, Instant};
 
 use openssl::ssl::{HandshakeError, Ssl, SslContext, SslContextBuilder, SslMethod, SslStream,
@@ -500,14 +499,14 @@ fn sc_prelude(
         }
     }
     if let Some(blob) = blob {
-        sleep(Duration::from_millis(SET_PSK_PRE_MS));
+        dev.pause(Duration::from_millis(SET_PSK_PRE_MS))?;
         send_psk(dev, blob, verbose, att)?;
     }
     if dev.xfer_raw(0x22, 0x01, 0x04, 0x13, 1, &tx[..7], &mut rx, 0, 0, 0).is_ok() {
         att.turn_on_tls = Some(rx[..resp_len(1)].to_vec());
     }
     if blob.is_some() {
-        sleep(Duration::from_millis(SET_PSK_TLS_ON_MS));
+        dev.pause(Duration::from_millis(SET_PSK_TLS_ON_MS))?;
     }
     Ok(())
 }
@@ -533,14 +532,14 @@ fn img_pull_record(e: &mut EngineShared) -> io::Result<()> {
                 {
                     break
                 }
-                Ok(_) => sleep(Duration::from_millis(60)),
+                Ok(_) => e.dev.pause(Duration::from_millis(60))?,
             }
         }
         result
     } else {
         let mut result = Err(io::Error::from_raw_os_error(nix::libc::ETIMEDOUT));
         for _ in 0..IMG_CONT_RETRIES {
-            sleep(Duration::from_millis(40));
+            e.dev.pause(Duration::from_millis(40))?;
             result = e.dev.xfer_raw(0, 0, 0, 0, 0, &[], &mut rx, 2, 700, PETAIC_XFER_READ_ONLY);
             match &result {
                 Err(e2) if e2.raw_os_error() == Some(nix::libc::ETIMEDOUT) => continue,
@@ -571,38 +570,20 @@ fn img_pull_record(e: &mut EngineShared) -> io::Result<()> {
 
 // ---- finger polling --------------------------------------------------------
 
-fn poll_finger(dev: &mut PetaicDev, timeout_ms: u32) -> bool {
-    let mut waited = 0u32;
-    while waited < timeout_ms {
-        let mut st = [0xffu8];
-        if dev
-            .xfer(PETAIT_CMD_POLL, PETAIT_DIR_OUT, PETAIT_ACCESS_WIDTH_32BIT, &[], &mut st, 1, 2, 10)
-            .is_ok()
-            && st[0] == 0x01
-        {
-            return true;
+fn poll_finger_state(dev: &mut PetaicDev, timeout_ms: u32, wanted: u8) -> io::Result<bool> {
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms as u64);
+    while Instant::now() < deadline {
+        dev.check_control()?;
+        let mut state = [0xffu8];
+        if dev.xfer(PETAIT_CMD_POLL, PETAIT_DIR_OUT, PETAIT_ACCESS_WIDTH_32BIT,
+                    &[], &mut state, 1, 2, 10).is_ok() && state[0] == wanted {
+            dev.check_control()?;
+            return Ok(true);
         }
-        sleep(Duration::from_millis(40));
-        waited += 40;
+        dev.check_control()?;
+        dev.pause(Duration::from_millis(40).min(deadline.saturating_duration_since(Instant::now())))?;
     }
-    false
-}
-
-fn poll_finger_up(dev: &mut PetaicDev, timeout_ms: u32) -> bool {
-    let mut waited = 0u32;
-    while waited < timeout_ms {
-        let mut st = [0xffu8];
-        if dev
-            .xfer(PETAIT_CMD_POLL, PETAIT_DIR_OUT, PETAIT_ACCESS_WIDTH_32BIT, &[], &mut st, 1, 2, 10)
-            .is_ok()
-            && st[0] == 0x00
-        {
-            return true;
-        }
-        sleep(Duration::from_millis(40));
-        waited += 40;
-    }
-    false
+    Ok(false)
 }
 
 fn request_image(dev: &mut PetaicDev) -> io::Result<()> {
@@ -726,6 +707,10 @@ impl Engine {
             key_id_readback: false,
             attempts: Vec::new(),
         })
+    }
+
+    pub fn set_control(&mut self, control: crate::control::OperationControl) {
+        self.shared.dev.set_control(control);
     }
 
     pub fn set_verbose(&mut self, v: bool) {
@@ -898,6 +883,7 @@ impl Engine {
     }
 
     fn session_ensure(&mut self) -> io::Result<()> {
+        self.shared.dev.check_control()?;
         if self.session.is_some() {
             return Ok(());
         }
@@ -929,7 +915,7 @@ impl Engine {
                     }
                     // Let the sensor settle; the legacy attempt then restarts
                     // from a full prelude, exactly as it did before cmd 0x27.
-                    sleep(Duration::from_millis(150));
+                    self.shared.dev.pause(Duration::from_millis(150))?;
                 }
                 self.legacy_handshake(deadline)
             }
@@ -969,13 +955,13 @@ impl Engine {
         self.shared.rec_idx = 0;
         self.shared.last_head = [0; 16];
 
-        if !poll_finger(&mut self.shared.dev, finger_ms) {
+        if !poll_finger_state(&mut self.shared.dev, finger_ms, 0x01)? {
             return Err(io::Error::from_raw_os_error(nix::libc::ETIMEDOUT));
         }
 
         // Arm only after finger is confirmed down; 0x37 is one-shot.
         request_image(&mut self.shared.dev)?;
-        sleep(Duration::from_millis(120));
+        self.shared.dev.pause(Duration::from_millis(120))?;
 
         let mut plain = [0u8; IMG_TOTAL];
         let mut off = 0usize;
@@ -1013,14 +999,16 @@ impl Engine {
     pub fn capture_frame(&mut self, finger_ms: u32) -> io::Result<[u8; IMG_SIZE]> {
         let mut img = [0u8; IMG_SIZE];
         for attempt in 0..CAPTURE_ATTEMPTS {
+            self.shared.dev.check_control()?;
             self.session_ensure()?;
             let fm = if attempt == 0 { finger_ms } else { 3000 };
             match self.capture_through_session(&mut img, fm) {
-                Ok(()) => return Ok(img),
+                Ok(()) => { self.shared.dev.check_control()?; return Ok(img); },
                 Err(ref e) if e.raw_os_error() == Some(nix::libc::ETIMEDOUT) && attempt == 0 => {
                     return Err(io::Error::from_raw_os_error(nix::libc::ETIMEDOUT));
                 }
                 Err(e) => {
+                    self.shared.dev.check_control()?;
                     self.session_drop();
                     if self.shared.verbose {
                         eprintln!(
@@ -1029,7 +1017,7 @@ impl Engine {
                             e
                         );
                     }
-                    sleep(Duration::from_millis(150));
+                    self.shared.dev.pause(Duration::from_millis(150))?;
                 }
             }
         }
@@ -1038,7 +1026,7 @@ impl Engine {
 
     /// Wait for the finger to lift (returns `true`) or for `timeout_ms` to elapse.
     pub fn wait_finger_up(&mut self, timeout_ms: u32) -> bool {
-        poll_finger_up(&mut self.shared.dev, timeout_ms)
+        poll_finger_state(&mut self.shared.dev, timeout_ms, 0x00).unwrap_or(false)
     }
 }
 

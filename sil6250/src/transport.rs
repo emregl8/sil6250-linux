@@ -4,11 +4,11 @@
 use std::fs::{File, OpenOptions};
 use std::num::NonZeroUsize;
 use std::os::unix::io::AsRawFd;
-use std::thread::sleep;
 use std::time::Duration;
 
 use nix::sys::mman::{mmap, munmap, MapFlags, ProtFlags};
 
+use crate::control::OperationControl;
 use crate::proto::{build_frame, build_frame_ex, parse_frame, PETAIT_OUTER_TYPE_STD};
 
 // ---- ioctl definitions (sil6250_uapi.h) ------------------------------------
@@ -53,6 +53,7 @@ pub struct PetaicDev {
     window: std::ptr::NonNull<u8>,
     pub window_size: usize,
     seq: u8,
+    control: OperationControl,
     pub verbose: bool,
     /// With `verbose`: dump whole frames instead of the first 32 bytes.
     /// Diagnostic tools only; far too noisy for the daemon's journal.
@@ -92,7 +93,19 @@ impl PetaicDev {
         let window = std::ptr::NonNull::new(window.as_ptr() as *mut u8)
             .ok_or_else(|| std::io::Error::from_raw_os_error(nix::libc::EINVAL))?;
 
-        Ok(PetaicDev { file, window, window_size: size, seq: 0, verbose: false, dump_full: false })
+        Ok(PetaicDev { file, window, window_size: size, seq: 0, control: OperationControl::default(), verbose: false, dump_full: false })
+    }
+
+    pub fn set_control(&mut self, control: OperationControl) {
+        self.control = control;
+    }
+
+    pub fn check_control(&self) -> std::io::Result<()> {
+        self.control.check()
+    }
+
+    pub fn pause(&self, duration: Duration) -> std::io::Result<()> {
+        self.control.sleep(duration)
     }
 
     fn set_gpio(&self, line: u32, value: u32) -> std::io::Result<()> {
@@ -108,33 +121,35 @@ impl PetaicDev {
         if self.verbose {
             eprintln!("[strobe write_done]");
         }
+        self.check_control()?;
         self.set_gpio(SIL6250_LINE_WRITE_DONE, 1)?;
-        sleep(Duration::from_millis(NOTIFY_HIGH_MS));
+        let result = self.pause(Duration::from_millis(NOTIFY_HIGH_MS));
         self.set_gpio(SIL6250_LINE_WRITE_DONE, 0)?;
-        Ok(())
+        result
     }
 
     pub fn strobe_read_done(&self) -> std::io::Result<()> {
         if self.verbose {
             eprintln!("[strobe read_done]");
         }
+        self.check_control()?;
         self.set_gpio(SIL6250_LINE_READ_DONE, 1)?;
-        sleep(Duration::from_millis(NOTIFY_HIGH_MS));
+        let result = self.pause(Duration::from_millis(NOTIFY_HIGH_MS));
         self.set_gpio(SIL6250_LINE_READ_DONE, 0)?;
-        sleep(Duration::from_millis(READ_POST_MS));
-        Ok(())
+        result?;
+        self.pause(Duration::from_millis(READ_POST_MS))
     }
 
     pub fn wait_irq(&self, timeout_ms: u32) -> std::io::Result<()> {
-        let w = SilWaitIrq {
-            timeout_ms: if timeout_ms == 0 { WAIT_IRQ_DEFAULT_MS } else { timeout_ms },
-            _pad: 0,
-        };
-        unsafe {
-            sil6250_wait_irq_raw(self.file.as_raw_fd(), &w)
-                .map_err(|e| std::io::Error::from_raw_os_error(e as i32))?;
-        }
-        Ok(())
+        let timeout = if timeout_ms == 0 { WAIT_IRQ_DEFAULT_MS } else { timeout_ms };
+        self.control.wait_irq(Duration::from_millis(timeout as u64), |timeout_ms| {
+            let w = SilWaitIrq { timeout_ms, _pad: 0 };
+            unsafe {
+                sil6250_wait_irq_raw(self.file.as_raw_fd(), &w)
+                    .map_err(|e| std::io::Error::from_raw_os_error(e as i32))?;
+            }
+            Ok(())
+        })
     }
 
     /// Qword-aligned write into the TX region (+0x000).
@@ -142,6 +157,7 @@ impl PetaicDev {
         if buf.len() % 8 != 0 || buf.len() > self.window_size {
             return Err(std::io::Error::from_raw_os_error(nix::libc::EINVAL));
         }
+        self.check_control()?;
         let dst = self.window.as_ptr() as *mut u64;
         unsafe {
             for (i, chunk) in buf.chunks_exact(8).enumerate() {
@@ -158,6 +174,7 @@ impl PetaicDev {
         if buf.len() % 8 != 0 || PETAIC_RX_OFFSET + buf.len() > self.window_size {
             return Err(std::io::Error::from_raw_os_error(nix::libc::EINVAL));
         }
+        self.check_control()?;
         let src = unsafe { self.window.as_ptr().add(PETAIC_RX_OFFSET) } as *const u64;
         unsafe {
             std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
@@ -222,9 +239,10 @@ impl PetaicDev {
         let mut rx = [0u8; PETAIC_READ_CHUNK_MAX];
         let tries = if tries == 0 { 1 } else { tries };
         for _ in 0..tries {
+            self.check_control()?;
             self.shm_write(&tx[..frame_len])?;
             self.strobe_write_done()?;
-            sleep(Duration::from_millis(if timeout_ms == 0 { 10 } else { timeout_ms as u64 }));
+            self.pause(Duration::from_millis(if timeout_ms == 0 { 10 } else { timeout_ms as u64 }))?;
             let read_len = PETAIC_READ_CHUNK_MAX & !7;
             self.shm_read(&mut rx[..read_len])?;
             if self.verbose {
@@ -293,6 +311,7 @@ impl PetaicDev {
         let mut rx = [0u8; PETAIC_READ_CHUNK_MAX];
         let tries = if tries == 0 { 1 } else { tries };
         for _ in 0..tries {
+            self.check_control()?;
             if read_only {
                 match self.wait_irq(timeout_ms) {
                     Ok(()) => {}
@@ -315,12 +334,13 @@ impl PetaicDev {
             self.strobe_write_done()?;
 
             if flags & PETAIC_XFER_NO_IRQ != 0 {
-                sleep(Duration::from_millis(if timeout_ms == 0 { 10 } else { timeout_ms as u64 }));
-            } else if self
-                .wait_irq(if timeout_ms == 0 { WAIT_IRQ_DEFAULT_MS } else { timeout_ms })
-                .is_err()
-            {
-                continue;
+                self.pause(Duration::from_millis(if timeout_ms == 0 { 10 } else { timeout_ms as u64 }))?;
+            } else {
+                match self.wait_irq(timeout_ms) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::TimedOut => continue,
+                    Err(error) => return Err(error),
+                }
             }
 
             self.shm_read(&mut rx[..read_len])?;

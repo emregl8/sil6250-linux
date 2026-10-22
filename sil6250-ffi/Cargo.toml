@@ -1,13 +1,16 @@
 [package]
 name = "sil6250-ffi"
-version = "0.1.0"
+version = "0.3.0"
 edition = "2021"
 description = "C interface to the SIL6250 capture and matching engine"
 license = "LGPL-2.1-or-later"
 publish = false
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+fuzzing = []
 
 [dependencies]
 sil6250 = { path = "../sil6250" }

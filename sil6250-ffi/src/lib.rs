@@ -1,12 +1,17 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 
-use std::ffi::{c_char, CStr};
+use std::ffi::{c_char, c_void, CStr};
 use std::ptr;
+use std::time::Duration;
 
+use sil6250::sift::{match_features, MAX_KPTS};
 use sil6250::{Engine, Features, Frame, PskMode, IMG_SIZE};
 
 const MAX_FEATURES: usize = 64;
 const MAX_GALLERY_BYTES: usize = 2 * 1024 * 1024;
+
+struct Gallery(Vec<Features>);
+struct Probe(Features);
 
 fn parse_psk_mode(value: Option<&str>) -> Option<PskMode> {
     value.map_or(Some(PskMode::Auto), |mode| mode.parse().ok())
@@ -43,6 +48,27 @@ unsafe extern "C" fn sil6250_engine_free(engine: *mut Engine) {
     if !engine.is_null() {
         drop(Box::from_raw(engine));
     }
+}
+
+type Cancelled = unsafe extern "C" fn(*mut c_void) -> i32;
+
+#[no_mangle]
+unsafe extern "C" fn sil6250_engine_set_control(
+    engine: *mut Engine,
+    timeout_ms: u32,
+    cancelled: Option<Cancelled>,
+    user_data: *mut c_void,
+) -> bool {
+    if engine.is_null() || timeout_ms == 0 {
+        return false;
+    }
+    let address = user_data as usize;
+    let control = sil6250::control::OperationControl::new(
+        Duration::from_millis(timeout_ms as u64),
+        move || cancelled.is_some_and(|callback| callback(address as *mut c_void) != 0),
+    );
+    (*engine).set_control(control);
+    true
 }
 
 #[no_mangle]
@@ -131,14 +157,14 @@ fn parse_gallery(gallery: &[u8]) -> Option<Vec<Features>> {
     let mut off = 0usize;
     let mut features = Vec::new();
     while off < gallery.len() {
+        if features.len() == MAX_FEATURES {
+            return None;
+        }
         let end = off.checked_add(4).filter(|&end| end <= gallery.len())?;
         let len = u32::from_le_bytes(gallery[off..end].try_into().ok()?) as usize;
         off = end;
         let end = off.checked_add(len).filter(|&end| end <= gallery.len())?;
         features.push(Features::deserialize(&gallery[off..end])?);
-        if features.len() > MAX_FEATURES {
-            return None;
-        }
         off = end;
     }
     if features.is_empty() {
@@ -147,8 +173,80 @@ fn parse_gallery(gallery: &[u8]) -> Option<Vec<Features>> {
     Some(features)
 }
 
+#[cfg(feature = "fuzzing")]
+pub mod fuzzing {
+    pub fn gallery(data: &[u8]) {
+        let handle = unsafe { super::sil6250_gallery_new(data.as_ptr(), data.len()) };
+        assert_eq!(!handle.is_null(), super::parse_gallery(data).is_some());
+        unsafe { super::sil6250_gallery_free(handle) };
+        if let Some(gallery) = super::parse_gallery(data) {
+            assert!(!gallery.is_empty() && gallery.len() <= super::MAX_FEATURES);
+            for feature in gallery {
+                assert!(super::Features::deserialize(&feature.serialize()).is_some());
+            }
+        }
+    }
+}
+
 fn gallery_score(probe: &Features, gallery: &[u8]) -> Option<i32> {
     Some(probe.verify_against(&parse_gallery(gallery)?))
+}
+
+fn prepared_match(probe: &Features, gallery: &[Features], threshold: i32) -> i32 {
+    if !(1..=MAX_KPTS as i32).contains(&threshold) {
+        return -1;
+    }
+    i32::from(
+        gallery
+            .iter()
+            .any(|reference| match_features(probe, reference) >= threshold),
+    )
+}
+
+#[no_mangle]
+unsafe extern "C" fn sil6250_gallery_new(data: *const u8, len: usize) -> *mut Gallery {
+    if data.is_null() || len > MAX_GALLERY_BYTES {
+        return ptr::null_mut();
+    }
+    parse_gallery(std::slice::from_raw_parts(data, len))
+        .map(|features| Box::into_raw(Box::new(Gallery(features))))
+        .unwrap_or(ptr::null_mut())
+}
+
+#[no_mangle]
+unsafe extern "C" fn sil6250_gallery_free(gallery: *mut Gallery) {
+    if !gallery.is_null() {
+        drop(Box::from_raw(gallery));
+    }
+}
+
+#[no_mangle]
+unsafe extern "C" fn sil6250_probe_new(raw: *const u8, len: usize) -> *mut Probe {
+    if raw.is_null() || len != IMG_SIZE {
+        return ptr::null_mut();
+    }
+    frame_from_slice(std::slice::from_raw_parts(raw, len))
+        .map(|frame| Box::into_raw(Box::new(Probe(Features::extract(&frame)))))
+        .unwrap_or(ptr::null_mut())
+}
+
+#[no_mangle]
+unsafe extern "C" fn sil6250_probe_free(probe: *mut Probe) {
+    if !probe.is_null() {
+        drop(Box::from_raw(probe));
+    }
+}
+
+#[no_mangle]
+unsafe extern "C" fn sil6250_probe_matches(
+    probe: *const Probe,
+    gallery: *const Gallery,
+    threshold: i32,
+) -> i32 {
+    if probe.is_null() || gallery.is_null() {
+        return -1;
+    }
+    prepared_match(&(*probe).0, &(*gallery).0, threshold)
 }
 
 #[no_mangle]
@@ -175,6 +273,32 @@ unsafe extern "C" fn sil6250_frame_score(
     };
     let probe = Features::extract(&frame);
     gallery_score(&probe, std::slice::from_raw_parts(gallery, gallery_len)).unwrap_or(-1)
+}
+
+#[no_mangle]
+unsafe extern "C" fn sil6250_frame_matches(
+    raw: *const u8,
+    raw_len: usize,
+    gallery: *const u8,
+    gallery_len: usize,
+    threshold: i32,
+) -> i32 {
+    if raw.is_null()
+        || gallery.is_null()
+        || raw_len != IMG_SIZE
+        || gallery_len > MAX_GALLERY_BYTES
+        || !(1..=MAX_KPTS as i32).contains(&threshold)
+    {
+        return -1;
+    }
+    let Some(gallery) = parse_gallery(std::slice::from_raw_parts(gallery, gallery_len)) else {
+        return -1;
+    };
+    let Some(frame) = frame_from_slice(std::slice::from_raw_parts(raw, raw_len)) else {
+        return -1;
+    };
+    let probe = Features::extract(&frame);
+    prepared_match(&probe, &gallery, threshold)
 }
 
 #[cfg(test)]
@@ -276,6 +400,17 @@ mod tests {
         unsafe {
             assert!(sil6250_engine_new(ptr::null()).is_null());
             sil6250_engine_free(ptr::null_mut());
+            assert!(!sil6250_engine_set_control(
+                ptr::null_mut(),
+                1000,
+                None,
+                ptr::null_mut()
+            ));
+            sil6250_gallery_free(ptr::null_mut());
+            sil6250_probe_free(ptr::null_mut());
+            assert!(sil6250_gallery_new(ptr::null(), 0).is_null());
+            assert!(sil6250_probe_new(ptr::null(), IMG_SIZE).is_null());
+            assert_eq!(sil6250_probe_matches(ptr::null(), ptr::null(), 5), -1);
             assert_eq!(
                 sil6250_engine_capture(ptr::null_mut(), 1, output.as_mut_ptr(), 4),
                 -1
@@ -295,6 +430,73 @@ mod tests {
             );
             assert_eq!(
                 sil6250_frame_score(raw.as_ptr(), IMG_SIZE, ptr::null(), 0),
+                -1
+            );
+        }
+    }
+
+    #[test]
+    fn threshold_matching_rejects_invalid_data_before_accepting() {
+        let mut state = 0x1234_5678u32;
+        let raw: [u8; IMG_SIZE] = std::array::from_fn(|_| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state as u8
+        });
+        let features = Features::extract(&Frame::from_raw(&raw));
+        assert!(!features.kp.is_empty());
+        let data = features.serialize();
+        let mut gallery = Vec::from((data.len() as u32).to_le_bytes());
+        gallery.extend(data);
+        unsafe {
+            let score =
+                sil6250_frame_score(raw.as_ptr(), raw.len(), gallery.as_ptr(), gallery.len());
+            let prepared = sil6250_gallery_new(gallery.as_ptr(), gallery.len());
+            let prepared_probe = sil6250_probe_new(raw.as_ptr(), raw.len());
+            assert!(!prepared.is_null() && !prepared_probe.is_null());
+            for threshold in 1..=MAX_KPTS as i32 {
+                assert_eq!(
+                    sil6250_probe_matches(prepared_probe, prepared, threshold),
+                    i32::from(score >= threshold)
+                );
+                assert_eq!(
+                    sil6250_frame_matches(
+                        raw.as_ptr(),
+                        raw.len(),
+                        gallery.as_ptr(),
+                        gallery.len(),
+                        threshold
+                    ),
+                    i32::from(score >= threshold)
+                );
+            }
+            for threshold in [0, -1, MAX_KPTS as i32 + 1] {
+                assert_eq!(
+                    sil6250_frame_matches(
+                        raw.as_ptr(),
+                        raw.len(),
+                        gallery.as_ptr(),
+                        gallery.len(),
+                        threshold
+                    ),
+                    -1
+                );
+            }
+            sil6250_gallery_free(prepared);
+            sil6250_probe_free(prepared_probe);
+            gallery.push(0);
+            assert!(sil6250_gallery_new(gallery.as_ptr(), gallery.len()).is_null());
+            assert_eq!(
+                sil6250_frame_matches(raw.as_ptr(), raw.len(), gallery.as_ptr(), gallery.len(), 1),
+                -1
+            );
+            assert_eq!(
+                sil6250_frame_matches(ptr::null(), raw.len(), gallery.as_ptr(), gallery.len(), 1),
+                -1
+            );
+            assert_eq!(
+                sil6250_frame_matches(raw.as_ptr(), raw.len(), ptr::null(), 0, 1),
                 -1
             );
         }

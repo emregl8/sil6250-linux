@@ -602,29 +602,19 @@ pub fn match_features(probe: &Features, reference: &Features) -> i32 {
     let pn = probe.kp.len();
     let rn = reference.kp.len();
 
-    // Mutual nearest-neighbour cross-check indices for reference keypoints.
     let mut ref_nn = vec![0usize; rn];
-    for j in 0..rn {
-        let mut best = f32::MAX;
-        let mut bi = 0usize;
-        for i in 0..pn {
-            let d = desc_dist2(&probe.kp[i].desc, &reference.kp[j].desc);
-            if d < best {
-                best = d;
-                bi = i;
-            }
-        }
-        ref_nn[j] = bi;
-    }
-
-    // Lowe ratio + mutual cross-check → tentative correspondences.
-    let mut corr: Vec<Corr> = Vec::new();
+    let mut ref_best = vec![f32::MAX; rn];
+    let mut probe_nn = Vec::with_capacity(pn);
     for i in 0..pn {
         let mut best = f32::MAX;
         let mut second = f32::MAX;
         let mut bj = 0usize;
         for j in 0..rn {
             let d = desc_dist2(&probe.kp[i].desc, &reference.kp[j].desc);
+            if d < ref_best[j] {
+                ref_best[j] = d;
+                ref_nn[j] = i;
+            }
             if d < best {
                 second = best;
                 best = d;
@@ -633,6 +623,11 @@ pub fn match_features(probe: &Features, reference: &Features) -> i32 {
                 second = d;
             }
         }
+        probe_nn.push((bj, best, second));
+    }
+
+    let mut corr: Vec<Corr> = Vec::new();
+    for (i, &(bj, best, second)) in probe_nn.iter().enumerate() {
         if ref_nn[bj] != i {
             continue;
         }
@@ -706,4 +701,67 @@ pub fn match_features(probe: &Features, reference: &Features) -> i32 {
 /// Gallery verify: max inlier count of `probe` over all reference feature sets.
 pub fn verify(probe: &Features, gallery: &[Features]) -> i32 {
     gallery.iter().map(|g| match_features(probe, g)).max().unwrap_or(0)
+}
+
+#[cfg(test)]
+mod matching_tests {
+    use super::*;
+
+    fn grid(offset_x: f32, offset_y: f32, descriptor_offset: usize) -> Features {
+        Features {
+            kp: (0..16)
+                .map(|i| {
+                    let mut desc = [0.0; DESC_DIM];
+                    desc[i + descriptor_offset] = 1.0;
+                    Keypoint {
+                        x: 8.0 + (i % 4) as f32 * 10.0 + offset_x,
+                        y: 8.0 + (i / 4) as f32 * 10.0 + offset_y,
+                        scale: 1.0,
+                        ori: 0.0,
+                        resp: 1.0,
+                        desc,
+                    }
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn matching_preserves_translation_and_reference_order() {
+        let probe = grid(0.0, 0.0, 0);
+        let mut reference = grid(4.0, 6.0, 0);
+        assert_eq!(match_features(&probe, &reference), 16);
+        reference.kp.reverse();
+        assert_eq!(match_features(&probe, &reference), 16);
+        reference.kp.truncate(12);
+        assert_eq!(match_features(&probe, &reference), 12);
+    }
+
+    #[test]
+    fn ambiguous_or_unrelated_descriptors_do_not_match() {
+        let probe = grid(0.0, 0.0, 0);
+        assert_eq!(match_features(&probe, &grid(0.0, 0.0, 64)), 0);
+        let mut ambiguous = grid(0.0, 0.0, 0);
+        for point in &mut ambiguous.kp {
+            point.desc = [0.0; DESC_DIM];
+            point.desc[0] = 1.0;
+        }
+        assert_eq!(match_features(&ambiguous, &ambiguous), 0);
+        for point in &mut ambiguous.kp {
+            point.desc = [f32::MAX; DESC_DIM];
+        }
+        assert_eq!(match_features(&probe, &ambiguous), 0);
+        assert_eq!(match_features(&probe, &Features { kp: Vec::new() }), 0);
+    }
+
+    #[test]
+    fn descriptor_similarity_requires_geometric_consistency() {
+        let probe = grid(0.0, 0.0, 0);
+        let mut reference = grid(0.0, 0.0, 0);
+        for point in &mut reference.kp {
+            point.x = 12.0;
+            point.y = 12.0;
+        }
+        assert_eq!(match_features(&probe, &reference), 1);
+    }
 }

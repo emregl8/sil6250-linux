@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 //! Driver library for the Silead SIL6250 fingerprint sensor.
 
+pub mod control;
 pub mod engine;
 pub mod matcher;
 pub mod proto;

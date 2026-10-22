@@ -16,23 +16,42 @@ by free. Arbitrary non-null invalid pointers cannot be validated by this API.
 engine_new returns null on invalid configuration or device-open failure.
 It uses upstream's automatic PSK provisioning by default. SIL6250_PSK_MODE
 accepts auto, provision, replay or legacy. Unknown or non-UTF-8 values fail
-before opening the device. The legacy fallback key remains shiba, matching
-sil6250d. Provisioning support does not authenticate the sensor against a
+before opening the device. The legacy fallback key remains shiba, preserving the previously tested fallback. Provisioning support does not authenticate the sensor against a
 hardware trust anchor.
 
 capture requires exactly SIL6250_IMAGE_SIZE bytes. Its return value is 1 for
 a frame, 0 for a timeout and -1 for failure. wait_lift returns false on a
-timeout or failure. A capture timeout is not a strict end-to-end deadline:
-connection setup and mailbox operations can take additional time.
+timeout or failure. Without an operation control, connection setup and mailbox operations can take
+additional time beyond the capture timeout. engine_set_control installs a shared
+time budget across connection setup, capture, retries and finger-lift polling.
+It accepts a nonzero millisecond timeout and an optional cancellation callback.
+The callback is called synchronously on the engine thread, must not block or
+unwind, and returns nonzero to cancel. Its user_data must remain valid until
+the control is replaced or the engine is freed. IRQ waits check cancellation
+in intervals of at most 50 ms; operating-system scheduling is not a real-time
+guarantee. Engine handles still require exclusive access.
 
 frame_quality and frame_ncc return -1 for invalid input sizes. frame_extract
 returns the number of bytes written, or -1 without writing if the output is
 too small. frame_score returns the best gallery score, or -1 for invalid
 input. gallery_valid reports whether the gallery encoding is accepted.
+frame_matches accepts a threshold from 1 to 200 and returns 1 for a match,
+0 for no match, or -1 for invalid input. It validates the whole gallery before
+matching and stops after the first reference reaching the threshold. Added
+in interface version 0.2.0; the earlier exports and ABI-0 SONAME are retained.
 
 A gallery contains little-endian u32 lengths followed by serialized Features.
 It must contain 1 to 64 entries and fit within 2 MiB. The caller owns all image
 and gallery buffers. The bridge retains none of these buffers after return.
+
+Interface version 0.3.0 adds engine_set_control and prepared matching handles.
+gallery_new validates and owns a parsed copy of the complete enrollment; it
+returns null for invalid data. probe_new extracts and owns one image's features.
+probe_matches uses these immutable handles with the same threshold and decision
+rules as frame_matches. Both handles can be reused within an operation; release
+each exactly once with its matching free function. Free accepts null. Do not use
+a handle after freeing it, free it concurrently with matching, or pass a handle
+of a different type. No enrollment format or matching threshold is changed.
 
 The interface and its tests are LGPL-2.1-or-later. The linked Rust engine
 retains its existing GPL-2.0 notices. Licensing of a combined binary also

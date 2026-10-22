@@ -124,6 +124,11 @@ sil6250.ko -> EC mailbox -> sensor
 `REVERSE_ENGINEERING_DETAILS.md` preserves the original protocol research.
 Its standalone-daemon architecture describes the historical implementation.
 
+`tools/benchmark_matching.py` compares a trusted baseline shared library
+against a new one using synthetic images only. It checks full scores and
+acceptance decisions before reporting median timings. These timings measure
+matching computation, not sensor latency or a biometric false-accept rate.
+
 ## Validation limits
 
 This remains an experimental integration. Earlier isolated verification,
