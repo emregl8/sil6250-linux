@@ -77,7 +77,7 @@ def main():
         (debian / 'control').write_text('Source: ' + package + '\n\nPackage: ' + package +
                                        '\nArchitecture: any\nDescription: SIL6250 libfprint driver\n')
         (debian / 'shlibs.local').write_text('libsil6250_ffi 0 ' + package + ' (= ' + args.version + ')\n')
-        dependencies = output('dpkg-shlibdeps', '-O', '--package=' + package, '-x' + package, '-l' + str(libraries),
+        dependencies = output('dpkg-shlibdeps', '-O', '-x' + package, '-l' + str(libraries),
                               *[str(libraries / name) for name in names], cwd=root)
         if not dependencies.startswith('shlibs:Depends='):
             raise RuntimeError('Could not determine runtime dependencies')
