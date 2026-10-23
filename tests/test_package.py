@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import tarfile
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -36,6 +37,52 @@ class PackageTests(unittest.TestCase):
         return [str(REPO / 'packaging/debian/build.py'),
                 '--build-root', str(self.build), '--output', str(self.output),
                 '--maintainer', 'Test <test@example.invalid>']
+
+    def archive_arguments(self):
+        source = self.root / 'source'
+        for name in ['packaging/debian/build.py', 'tools/check_runtime.py',
+                     'integrations/libfprint/revision', 'LICENSE']:
+            target = source / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(REPO / name, target)
+        args = self.arguments()
+        args[0] = str(source / 'packaging/debian/build.py')
+        return args
+
+    def test_source_archive_with_explicit_epoch_is_reproducible(self):
+        epoch = '1700000000'
+        args = self.archive_arguments()
+        env = os.environ | {'SOURCE_DATE_EPOCH': epoch}
+        result = subprocess.run(['python3', *args], env=env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        archive = next(self.output.glob('*.deb'))
+        content = archive.read_bytes()
+        data = subprocess.check_output(['dpkg-deb', '--fsys-tarfile', str(archive)])
+        with tarfile.open(fileobj=io.BytesIO(data)) as files:
+            self.assertTrue(all(member.mtime == int(epoch) for member in files.getmembers()))
+        archive.unlink()
+        result = subprocess.run(['python3', *args], env=env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(next(self.output.glob('*.deb')).read_bytes(), content)
+
+    def test_source_archive_requires_explicit_epoch(self):
+        env = os.environ.copy()
+        env.pop('SOURCE_DATE_EPOCH', None)
+        result = subprocess.run(['python3', *self.archive_arguments()], env=env,
+                                capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Set SOURCE_DATE_EPOCH', result.stderr)
+        self.assertFalse(self.output.exists())
+
+    def test_invalid_epoch_is_rejected(self):
+        for epoch in ['', '-1', '1.5', 'now', '1700000000\n']:
+            with self.subTest(epoch=epoch):
+                result = subprocess.run(['python3', *self.arguments()],
+                                        env=os.environ | {'SOURCE_DATE_EPOCH': epoch},
+                                        capture_output=True, text=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('SOURCE_DATE_EPOCH must be', result.stderr)
+                self.assertFalse(self.output.exists())
 
     def test_clean_package_contains_validated_libraries(self):
         result = self.package()

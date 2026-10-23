@@ -35,6 +35,15 @@ def main():
         maintainer = f'{name} <{email}>'
     if '\n' in maintainer or '\r' in maintainer or not re.fullmatch(r'[^<>]+ <[^<>\s]+@[^<>\s]+>', maintainer):
         parser.error('Set a valid --maintainer "Name <email>"')
+    epoch = os.environ.get('SOURCE_DATE_EPOCH')
+    if epoch is None:
+        try:
+            epoch = output('git', '-C', str(repo), 'show', '-s', '--format=%ct', 'HEAD',
+                           stderr=subprocess.DEVNULL)
+        except (FileNotFoundError, subprocess.CalledProcessError):
+            parser.error('Set SOURCE_DATE_EPOCH when building without Git history')
+    if not re.fullmatch(r'[0-9]+', epoch):
+        parser.error('SOURCE_DATE_EPOCH must be a non-negative integer')
     arch = output('dpkg-architecture', '-qDEB_HOST_ARCH')
     if arch != output('dpkg-architecture', '-qDEB_BUILD_ARCH'):
         parser.error('Cross packaging is not supported; build on the target architecture')
@@ -105,7 +114,7 @@ def main():
                 executable = path.parent == metadata and path.name in {'postinst', 'postrm'}
                 path.chmod(0o755 if path.is_dir() or executable else 0o644)
         env = os.environ.copy()
-        env.setdefault('SOURCE_DATE_EPOCH', output('git', '-C', str(repo), 'show', '-s', '--format=%ct', 'HEAD'))
+        env['SOURCE_DATE_EPOCH'] = epoch
         archive = root / 'result.deb'
         subprocess.run(['dpkg-deb', '--root-owner-group', '-Zxz', '--build', str(stage), str(archive)],
                        check=True, env=env)

@@ -220,6 +220,10 @@ are included in the generated aggregate report.
 python3 packaging/debian/build.py --maintainer 'Name <email>'
 ```
 
+The package timestamp uses `SOURCE_DATE_EPOCH` when set, otherwise the current
+commit's timestamp. Builds from source archives require an explicit
+`--maintainer` and `SOURCE_DATE_EPOCH` because Git metadata is unavailable.
+
 The development package contains private runtime libraries and an override for
 standard fprintd; it does not include a replacement fprintd daemon or kernel
 module. It conflicts with the legacy daemons. Install the kernel module
