@@ -8,6 +8,8 @@ cargo test --workspace --locked --release
 cargo clippy -p sil6250-ffi --all-targets --no-deps -- -D warnings
 python3 tests/test_install.py
 python3 tests/test_kernel_install.py
+python3 tests/test_runtime.py
+python3 tests/test_package.py
 ./install.sh build
 ```
 

@@ -83,7 +83,11 @@ override under `build/native/stage`. `PREFIX` defaults to `/usr/local`;
 It does not remove existing fingerprint services or records. Staging refuses
 an existing destination, including symbolic links. Files are assembled in a
 private temporary directory and renamed into place only after all copies
-succeed. For a subsequent staging run, choose a fresh `DESTDIR`.
+succeed and the copied libraries pass runtime validation. Staging and Debian
+packaging reject unexpected SONAMEs, embedded library search paths, and
+sanitizer dependencies or symbols. They also reject executables and libraries
+whose ELF class, byte order or processor differs from the native runtime.
+For a subsequent staging run, choose a fresh `DESTDIR`.
 
 Before activating the libraries, finish an isolated hardware test of this
 revision, retain a working alternative login method, and back up the existing

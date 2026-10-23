@@ -39,6 +39,7 @@ stage_userspace() (
     install -d "$temporary$library_dir" "$temporary/etc/systemd/system/fprintd.service.d"
     install -m 0755 "$built/libfprint-2.so.2.0.0" "$temporary$library_dir/"
     install -m 0755 "$built/libsil6250_ffi.so.0" "$temporary$library_dir/"
+    python3 "$HERE/tools/check_runtime.py" "$temporary$library_dir"
     ln -sfn libfprint-2.so.2.0.0 "$temporary$library_dir/libfprint-2.so.2"
     cat > "$temporary/etc/systemd/system/fprintd.service.d/60-sil6250.conf" <<EOF
 [Service]

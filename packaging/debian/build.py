@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 
 
@@ -35,6 +36,8 @@ def main():
     if '\n' in maintainer or '\r' in maintainer or not re.fullmatch(r'[^<>]+ <[^<>\s]+@[^<>\s]+>', maintainer):
         parser.error('Set a valid --maintainer "Name <email>"')
     arch = output('dpkg-architecture', '-qDEB_HOST_ARCH')
+    if arch != output('dpkg-architecture', '-qDEB_BUILD_ARCH'):
+        parser.error('Cross packaging is not supported; build on the target architecture')
     triplet = output('dpkg-architecture', '-qDEB_HOST_MULTIARCH')
     package = 'sil6250-libfprint'
     args.output.mkdir(parents=True, exist_ok=True)
@@ -52,11 +55,10 @@ def main():
         names = ['libfprint-2.so.2.0.0', 'libsil6250_ffi.so.0']
         for name in names:
             source = args.build_root / 'prefix/lib' / name
-            dynamic = output('readelf', '-d', str(source))
-            if re.search(r'\((?:RUNPATH|RPATH)\)', dynamic):
-                raise RuntimeError('Runtime library search paths must be absent: ' + name)
             shutil.copyfile(source, libraries / name)
             (libraries / name).chmod(0o644)
+        subprocess.run([sys.executable, str(repo / 'tools/check_runtime.py'), str(libraries)],
+                       check=True)
         (libraries / 'libfprint-2.so.2').symlink_to('libfprint-2.so.2.0.0')
         dropin = stage / 'usr/lib/systemd/system/fprintd.service.d/60-sil6250.conf'
         dropin.parent.mkdir(parents=True)

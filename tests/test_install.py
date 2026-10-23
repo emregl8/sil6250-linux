@@ -4,6 +4,8 @@ import subprocess
 import tempfile
 import unittest
 
+from runtime_fixtures import LIBRARIES, build_libraries, build_library
+
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -41,10 +43,7 @@ class InstallerTests(unittest.TestCase):
         )
 
     def make_libraries(self):
-        lib = self.built / "prefix/lib"
-        lib.mkdir(parents=True)
-        (lib / "libfprint-2.so.2.0.0").write_bytes(b"test libfprint")
-        (lib / "libsil6250_ffi.so.0").write_bytes(b"test bridge")
+        build_libraries(self.built / "prefix/lib")
 
     def assert_no_system_commands(self):
         self.assertFalse(self.calls.exists())
@@ -61,7 +60,9 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         lib = self.stage / "usr/local/lib/sil6250"
         self.assertEqual((lib / "libfprint-2.so.2").resolve(), lib / "libfprint-2.so.2.0.0")
-        self.assertEqual((lib / "libsil6250_ffi.so.0").read_bytes(), b"test bridge")
+        for name in LIBRARIES:
+            self.assertEqual((lib / name).read_bytes(),
+                             (self.built / "prefix/lib" / name).read_bytes())
         override = self.stage / "etc/systemd/system/fprintd.service.d/60-sil6250.conf"
         self.assertEqual(override.stat().st_mode & 0o777, 0o644)
         self.assertIn("LD_LIBRARY_PATH=/usr/local/lib/sil6250", override.read_text())
@@ -71,6 +72,39 @@ class InstallerTests(unittest.TestCase):
         self.assertIn("LimitCORE=0", override.read_text())
         self.assertIn("CoredumpFilter=0x0", override.read_text())
         self.assertNotIn("ExecStart", override.read_text())
+        self.assert_no_system_commands()
+
+    def test_invalid_runtime_is_rejected_without_partial_stage(self):
+        self.make_libraries()
+        for name in LIBRARIES:
+            for defect in ['soname', 'runpath', 'rpath', 'asan', 'sanitizer-symbol', 'non-elf',
+                           'elf32', 'machine', 'byte-order', 'executable', 'pie', 'truncated']:
+                with self.subTest(name=name, defect=defect):
+                    self.stage = self.root / f'stage-{name}-{defect}'
+                    build_library(self.built / "prefix/lib", name, defect)
+                    result = self.run_install("stage", DESTDIR=str(self.stage))
+                    self.assertNotEqual(result.returncode, 0, result.stdout)
+                    self.assertFalse(self.stage.exists())
+                    self.assertEqual(list(self.root.glob(".sil6250-stage.*")), [])
+                    self.assert_no_system_commands()
+                    build_library(self.built / "prefix/lib", name)
+
+    def test_copied_runtime_is_validated(self):
+        self.make_libraries()
+        bad = self.root / "bad"
+        name = 'libsil6250_ffi.so.0'
+        build_library(bad, name, 'sanitizer-symbol')
+        install = self.commands / "install"
+        install.write_text('#!/bin/bash\nset -eu\n/usr/bin/install "$@"\n'
+                           'if [[ ${!#} == */lib/sil6250/ ]]; then\n'
+                           '    /usr/bin/cp -- "$BAD_LIBRARY" "${!#}/libsil6250_ffi.so.0"\n'
+                           'fi\n')
+        install.chmod(0o755)
+        result = self.run_install("stage", BAD_LIBRARY=str(bad / name))
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn('Sanitizer symbols', result.stderr)
+        self.assertFalse(self.stage.exists())
+        self.assertEqual(list(self.root.glob(".sil6250-stage.*")), [])
         self.assert_no_system_commands()
 
     def test_existing_stage_and_redirected_files_are_preserved(self):
