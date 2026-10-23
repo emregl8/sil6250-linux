@@ -5,13 +5,15 @@
 //! Before every handshake it pushes its own 32-byte PSK to the sensor inside a
 //! 128-byte blob (cmd 0x27) and then handshakes with that key. The blob is only
 //! obfuscated, not encrypted: anyone who can see the mailbox can recover the
-//! key, so nothing in here is a secret worth protecting.
+//! key. Provisioning cannot authenticate the sensor against an active mailbox
+//! attacker; keys must still be kept out of diagnostic reports.
 //!
 //! Once keyed, the sensor presents PSK identity `SHA384(key)[..32]` and answers
 //! cmd 0x28 with `SHA384(key)` followed by 16 zero bytes. An unkeyed sensor
 //! returns all zeros for both.
 
 use std::io;
+use zeroize::Zeroizing;
 
 use crate::proto::{PETAIT_CMD_KEY_ID, PETAIT_CMD_SET_PSK};
 
@@ -90,13 +92,13 @@ pub fn unwrap(blob: &[u8; PSK_BLOB_LEN]) -> ([u8; PSK_SALT_LEN], [u8; PSK_LEN]) 
 
 /// Fresh random key in a fresh random blob (OpenSSL CSPRNG).
 pub fn random_blob() -> io::Result<([u8; PSK_LEN], [u8; PSK_BLOB_LEN])> {
-    let mut key = [0u8; PSK_LEN];
-    let mut salt = [0u8; PSK_SALT_LEN];
-    let mut filler = [0u8; PSK_BLOB_LEN];
+    let mut key = Zeroizing::new([0u8; PSK_LEN]);
+    let mut salt = Zeroizing::new([0u8; PSK_SALT_LEN]);
+    let mut filler = Zeroizing::new([0u8; PSK_BLOB_LEN]);
     for buf in [&mut key[..], &mut salt[..], &mut filler[..]] {
         openssl::rand::rand_bytes(buf).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
     }
-    Ok((key, wrap(&salt, &key, filler)))
+    Ok((*key, wrap(&salt, &key, *filler)))
 }
 
 /// `SHA384(key)`: what a keyed sensor reports as its key id.

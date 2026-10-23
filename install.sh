@@ -42,8 +42,11 @@ stage_userspace() (
     cat > "$temporary/etc/systemd/system/fprintd.service.d/60-sil6250.conf" <<EOF
 [Service]
 Environment=LD_LIBRARY_PATH=$library_dir
+Environment=SIL6250_PSK_MODE=provision
 DeviceAllow=/dev/sil6250 rw
 UMask=0077
+LimitCORE=0
+CoredumpFilter=0x0
 EOF
     chmod 0644 "$temporary/etc/systemd/system/fprintd.service.d/60-sil6250.conf"
     mv -T -- "$temporary" "$stage_dir"

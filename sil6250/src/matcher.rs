@@ -2,6 +2,7 @@
 //! NCC-based frame matcher for the SIL6250 64×80 sensor.
 
 use crate::engine::IMG_SIZE;
+use zeroize::Zeroize;
 
 pub const PM_W: usize = 64;
 pub const PM_H: usize = 80;
@@ -10,6 +11,12 @@ pub const PM_N: usize = PM_W * PM_H; // 5120
 /// Destriped, locally-normalized frame ready for matching.
 pub struct Frame {
     pub px: [f32; PM_N],
+}
+
+impl Drop for Frame {
+    fn drop(&mut self) {
+        self.px.zeroize();
+    }
 }
 
 impl Frame {

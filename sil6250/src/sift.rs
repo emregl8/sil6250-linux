@@ -12,6 +12,7 @@
 //! Accept fingerprint match when `ps_verify` returns ≥ 5 inliers.
 
 use std::f32::consts::PI;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::matcher::{Frame, PM_H, PM_N, PM_W};
 
@@ -28,13 +29,30 @@ pub struct Keypoint {
     pub desc: [f32; DESC_DIM],
 }
 
+impl Zeroize for Keypoint {
+    fn zeroize(&mut self) {
+        self.x.zeroize();
+        self.y.zeroize();
+        self.scale.zeroize();
+        self.ori.zeroize();
+        self.resp.zeroize();
+        self.desc.zeroize();
+    }
+}
+
 pub struct Features {
     pub kp: Vec<Keypoint>,
 }
 
+impl Drop for Features {
+    fn drop(&mut self) {
+        self.kp.zeroize();
+    }
+}
+
 impl Features {
     fn new() -> Self {
-        Features { kp: Vec::new() }
+        Features { kp: Vec::with_capacity(MAX_KPTS) }
     }
 
     /// Serialize features to a compact binary representation.
@@ -86,7 +104,7 @@ impl Features {
             return None;
         }
 
-        let mut kp = Vec::with_capacity(n);
+        let mut kp = Zeroizing::new(Vec::with_capacity(n));
         let mut off = 12;
         for _ in 0..n {
             let x = f32::from_le_bytes(bytes[off..off + 4].try_into().ok()?);
@@ -127,7 +145,7 @@ impl Features {
                 desc,
             });
         }
-        Some(Features { kp })
+        Some(Features { kp: std::mem::take(&mut *kp) })
     }
 }
 

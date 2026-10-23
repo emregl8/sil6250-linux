@@ -1,9 +1,8 @@
 diff --git a/libfprint/drivers/sil6250.c b/libfprint/drivers/sil6250.c
 new file mode 100644
-index 00000000..135cb4c5
 --- /dev/null
 +++ b/libfprint/drivers/sil6250.c
-@@ -0,0 +1,555 @@
+@@ -0,0 +1,587 @@
 +/* SPDX-License-Identifier: LGPL-2.1-or-later */
 +
 +#define FP_COMPONENT "sil6250"
@@ -13,6 +12,7 @@ index 00000000..135cb4c5
 +
 +#include <fcntl.h>
 +#include <math.h>
++#include <string.h>
 +#include <unistd.h>
 +
 +G_DEFINE_AUTOPTR_CLEANUP_FUNC (Sil6250Probe, sil6250_probe_free)
@@ -23,6 +23,37 @@ index 00000000..135cb4c5
 +#define MAX_REDUNDANT (ENROLL_STAGES * 4)
 +#define VERIFY_SCANS 3
 +#define VERIFY_RETRY_SECONDS 8
++
++typedef guint8 RawImage[SIL6250_IMAGE_SIZE];
++typedef guint8 FeatureBuffer[SIL6250_MAX_FEATURE_SIZE];
++
++static void
++raw_image_clear (RawImage *image)
++{
++  explicit_bzero (*image, sizeof *image);
++}
++
++static void
++feature_buffer_clear (FeatureBuffer *feature)
++{
++  explicit_bzero (*feature, sizeof *feature);
++}
++
++G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (RawImage, raw_image_clear)
++G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (FeatureBuffer, feature_buffer_clear)
++
++static void
++sensitive_bytes_unref (GByteArray *bytes)
++{
++  if (bytes != NULL)
++    {
++      explicit_bzero (bytes->data, bytes->len);
++      g_byte_array_unref (bytes);
++    }
++}
++
++typedef GByteArray SensitiveBytes;
++G_DEFINE_AUTOPTR_CLEANUP_FUNC (SensitiveBytes, sensitive_bytes_unref)
 +
 +typedef struct _FpiDeviceSil6250
 +{
@@ -91,7 +122,7 @@ index 00000000..135cb4c5
 +  OperationResult *result = data;
 +  if (result == NULL)
 +    return;
-+  g_clear_pointer (&result->gallery, g_byte_array_unref);
++  g_clear_pointer (&result->gallery, sensitive_bytes_unref);
 +  g_free (result);
 +}
 +
@@ -170,7 +201,7 @@ index 00000000..135cb4c5
 +  Operation *op = task_data;
 +  Sil6250Engine *engine;
 +  OperationResult *result;
-+  g_autoptr(GByteArray) kept_frames = NULL;
++  g_autoptr(SensitiveBytes) kept_frames = NULL;
 +  guint accepted = 0;
 +  guint redundant = 0;
 +  guint scanned = 0;
@@ -201,8 +232,8 @@ index 00000000..135cb4c5
 +  result->match_index = -1;
 +  if (op->kind == OP_ENROLL)
 +    {
-+      result->gallery = g_byte_array_new ();
-+      kept_frames = g_byte_array_new ();
++      result->gallery = g_byte_array_sized_new (ENROLL_STAGES * (sizeof (guint32) + SIL6250_MAX_FEATURE_SIZE));
++      kept_frames = g_byte_array_sized_new (ENROLL_STAGES * SIL6250_IMAGE_SIZE);
 +    }
 +  retry_deadline = deadline;
 +
@@ -210,7 +241,7 @@ index 00000000..135cb4c5
 +         g_get_monotonic_time () < deadline &&
 +         g_get_monotonic_time () < retry_deadline)
 +    {
-+      guint8 raw[SIL6250_IMAGE_SIZE];
++      g_auto(RawImage) raw = { 0 };
 +      gint captured = sil6250_engine_capture (engine, 1000, raw, sizeof raw);
 +      gfloat quality;
 +
@@ -306,7 +337,7 @@ index 00000000..135cb4c5
 +        }
 +      else
 +        {
-+          guint8 feature[SIL6250_MAX_FEATURE_SIZE];
++          g_auto(FeatureBuffer) feature = { 0 };
 +          ssize_t feature_len = sil6250_frame_extract (raw, sizeof raw,
 +                                                        feature, sizeof feature);
 +          if (feature_len <= 0)

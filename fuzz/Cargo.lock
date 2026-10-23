@@ -188,6 +188,7 @@ dependencies = [
  "nix",
  "openssl",
  "thiserror",
+ "zeroize",
 ]
 
 [[package]]
@@ -195,6 +196,7 @@ name = "sil6250-ffi"
 version = "0.3.0"
 dependencies = [
  "sil6250",
+ "zeroize",
 ]
 
 [[package]]
@@ -259,3 +261,9 @@ name = "vcpkg"
 version = "0.2.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
+
+[[package]]
+name = "zeroize"
+version = "1.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e13084392c5e4bc371903e2935a5eaeed24905a7511356b883835e18a78f6879"

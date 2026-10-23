@@ -5,11 +5,12 @@ use std::fs::{File, OpenOptions};
 use std::num::NonZeroUsize;
 use std::os::unix::io::AsRawFd;
 use std::time::Duration;
+use zeroize::Zeroizing;
 
 use nix::sys::mman::{mmap, munmap, MapFlags, ProtFlags};
 
 use crate::control::OperationControl;
-use crate::proto::{build_frame, build_frame_ex, parse_frame, PETAIT_OUTER_TYPE_STD};
+use crate::proto::{build_frame, build_frame_ex, parse_frame, PETAIT_CMD_SET_PSK, PETAIT_OUTER_TYPE_STD};
 
 // ---- ioctl definitions (sil6250_uapi.h) ------------------------------------
 
@@ -45,6 +46,11 @@ pub const PETAIC_XFER_NO_IRQ: u32 = 1 << 1;
 const NOTIFY_HIGH_MS: u64 = 10;
 const READ_POST_MS: u64 = 20;
 const WAIT_IRQ_DEFAULT_MS: u32 = 500;
+
+fn is_psk_frame(frame: &[u8]) -> bool {
+    matches!(frame.first(), Some(0xf0)) && frame.get(9) == Some(&PETAIT_CMD_SET_PSK)
+        || matches!(frame.first(), Some(0x5a)) && frame.get(1) == Some(&PETAIT_CMD_SET_PSK)
+}
 
 // ---- device ----------------------------------------------------------------
 
@@ -191,6 +197,10 @@ impl PetaicDev {
     }
 
     fn dump(&self, tag: &str, p: &[u8]) {
+        if is_psk_frame(p) {
+            eprintln!("{} [{}]: PSK frame redacted", tag, p.len());
+            return;
+        }
         if self.dump_full {
             eprintln!("{} [{}]:", tag, p.len());
             for row in p.chunks(32) {
@@ -227,9 +237,9 @@ impl PetaicDev {
         }
         self.seq = self.seq.wrapping_add(1);
         let seq = self.seq;
-        let mut tx = [0u8; PETAIC_TX_BUF_SIZE];
+        let mut tx = Zeroizing::new([0u8; PETAIC_TX_BUF_SIZE]);
         let frame_len = build_frame(
-            cmd, dir, width, tx_payload, expected_rx_len, seq, PETAIT_OUTER_TYPE_STD, &mut tx,
+            cmd, dir, width, tx_payload, expected_rx_len, seq, PETAIT_OUTER_TYPE_STD, &mut tx[..],
         )
         .map_err(|_| std::io::Error::from_raw_os_error(nix::libc::EINVAL))?;
         if self.verbose {
@@ -295,11 +305,11 @@ impl PetaicDev {
             return Err(std::io::Error::from_raw_os_error(nix::libc::EINVAL));
         }
 
-        let mut tx = [0u8; PETAIC_TX_BUF_SIZE];
+        let mut tx = Zeroizing::new([0u8; PETAIC_TX_BUF_SIZE]);
         let frame_len = if !read_only {
             self.seq = self.seq.wrapping_add(1);
             let seq = self.seq;
-            build_frame_ex(cmd, dir, width, tx_payload, be32, 0, seq, outer_type, &mut tx)
+            build_frame_ex(cmd, dir, width, tx_payload, be32, 0, seq, outer_type, &mut tx[..])
                 .map_err(|_| std::io::Error::from_raw_os_error(nix::libc::EINVAL))?
         } else {
             0
@@ -366,5 +376,26 @@ impl Drop for PetaicDev {
                 self.window_size,
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provisioning_frames_are_redacted_in_both_directions() {
+        let (be32, payload) = crate::psk::set_psk_args(&crate::psk::WINDOWS_BLOB);
+        let mut frame = [0; PETAIC_TX_BUF_SIZE];
+        let n = build_frame_ex(PETAIT_CMD_SET_PSK, crate::psk::SET_PSK_DIR,
+            crate::psk::SET_PSK_WIDTH, &payload, be32, 0, 1,
+            crate::psk::SET_PSK_OUTER, &mut frame).unwrap();
+        assert!(is_psk_frame(&frame[..n]));
+        assert!(is_psk_frame(&[0x5a, PETAIT_CMD_SET_PSK, 0x04]));
+        for length in 0..10 {
+            assert!(!is_psk_frame(&frame[..length]));
+        }
+        frame[9] = crate::proto::PETAIT_CMD_TLS_DATA;
+        assert!(!is_psk_frame(&frame[..n]));
     }
 }

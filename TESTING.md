@@ -14,6 +14,17 @@ The native build runs libfprint's available tests, including SIL6250's mocked
 capture, cancellation, enrollment and identification tests. A skipped device
 replay test is not a hardware test pass.
 
+## Temporary memory
+
+Rust uses `zeroize` for owned PSK plans, callback keys, transmit buffers,
+decrypted capture buffers and parsed features. The native worker clears its
+temporary image and feature arrays on normal, cancellation and error exits.
+Enrollment arrays reserve their maximum size to avoid leaving copies behind
+during growth. Staged service overrides set `LimitCORE=0` and
+`CoredumpFilter=0x0`; existing deployments require an explicit update.
+These measures do not guarantee that compiler temporaries, external-library
+allocations, abrupt process termination or previously written swap are cleared.
+
 ## Permissions
 
 Install the build dependencies and Python's dbus and GI modules, then run:

@@ -45,9 +45,19 @@ cargo test --workspace --all-targets --locked
 python3 -m unittest discover -s tests
 ```
 
-The bridge uses upstream's automatic PSK provisioning by default.
+The bridge requires fresh random PSK provisioning by default. A failed key
+setup or handshake fails the operation without trying a public fallback key.
 `SIL6250_PSK_MODE=auto|provision|replay|legacy` can be set in fprintd's
-environment; invalid values fail engine initialization. See `sil6250-ffi/ABI`
+environment; invalid values fail engine initialization. `auto`, `replay` and
+`legacy` are explicit compatibility modes that permit public keys. New staged
+installations and Debian packages select `provision`. Existing local overrides
+may still select a compatibility mode and require a separate migration test.
+Provisioning transfers an obfuscated key over the mailbox; it does not provide
+a hardware trust anchor against an attacker who can observe or control that
+mailbox. Keep direct device access restricted to the privileged service.
+Physical spoof resistance and population false-acceptance rates have not been
+established by the single-device functional tests.
+See `sil6250-ffi/ABI`
 for ownership, error conventions and timeout limits. Verification allows up
 to three separate presses at the existing matching threshold. Descriptor
 pairs are evaluated once for both nearest-neighbor directions. The driver
@@ -92,7 +102,10 @@ and restart standard fprintd only when ready to test authentication.
 The override selects these libraries for fprintd only and allows access to
 `/dev/sil6250`. It preserves the vendor's authorization and service settings.
 Other applications continue to use the distribution's installed libfprint.
-The override also applies an owner-only creation mask. Fingerprint records
+The override also applies an owner-only creation mask and restricts core-dump
+memory. Selected owned temporary key and capture buffers are cleared when released;
+this does not guarantee removal of compiler-generated copies, third-party
+allocations or data already captured in swap or diagnostics. Fingerprint records
 remain under `/var/lib/fprint`; the old standalone
 backend's records are not automatically converted or deleted. Enroll with
 `fprintd-enroll` after validating the new service.
@@ -130,6 +143,12 @@ acceptance decisions before reporting median timings. These timings measure
 matching computation, not sensor latency or a biometric false-accept rate.
 
 ## Validation limits
+
+Random provisioning removes the default public-key fallback, but the key blob
+is only obfuscated on the mailbox. An attacker who can observe or control that
+link can recover the key. This sensor protocol has no verified hardware trust
+anchor; provisioning does not establish resistance to an active physical
+attacker. PSK frames and plaintext keys are excluded from diagnostic reports.
 
 This remains an experimental integration. Earlier isolated verification,
 GNOME unlocking and reboot tests used the engine before upstream's recent

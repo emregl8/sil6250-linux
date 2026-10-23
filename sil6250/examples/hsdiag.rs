@@ -15,11 +15,11 @@ const USAGE: &str = "\
 usage: hsdiag [DEVPATH] [MODE] [options]
 
   DEVPATH          kernel device (default /dev/sil6250)
-  MODE             auto | provision | replay | legacy (default auto)
+  MODE             auto | provision | replay | legacy (default provision)
                      provision  push a fresh random PSK (cmd 0x27), handshake with it
                      replay     push the blob captured from the Windows driver
                      legacy     no cmd 0x27; try the firmware fallback keys
-                     auto       provision, then legacy if that fails (daemon default)
+                     auto       provision, then legacy if that fails (compatibility only)
 
   --key NAME       legacy fallback key to try (shiba, saintbernard, chihuahua,
                    bordercollie); default: all four in turn
@@ -48,15 +48,15 @@ fn raw(label: &str, resp: &Option<Vec<u8>>) {
     }
 }
 
-fn key_id(label: &str, resp: &Option<Vec<u8>>, key: Option<&[u8; 32]>) {
+fn key_id(label: &str, resp: &Option<Vec<u8>>, expected: Option<&[u8; 32]>) {
     raw(label, resp);
     let Some(id) = resp.as_deref().and_then(psk::key_id_from_response) else {
         return;
     };
-    let verdict = match key {
-        Some(key) if id == psk::key_id_data(key) => "== SHA384(key) + 16 zero bytes",
+    let verdict = match expected {
+        Some(want) if id[..32] == want[..] => "matches expected identity",
         _ if id.iter().all(|&b| b == 0) => "all zeros (sensor not keyed)",
-        Some(_) => "!= SHA384(key)",
+        Some(_) => "does not match expected identity",
         None => "non-zero (sensor holds a provisioned key)",
     };
     println!("    -> {verdict}");
@@ -76,13 +76,6 @@ fn identity_verdict(a: &HandshakeAttempt) -> &'static str {
 fn print_attempt(n: usize, a: &HandshakeAttempt) {
     println!();
     println!("=== attempt {n}: key '{}' ===", a.key_name);
-    if a.provisioned {
-        // Printing this key gives nothing away: it was just sent to the sensor
-        // over the mailbox under two fixed XORs, and this output includes that
-        // frame. (The fallback ring keys are public too, see the RE notes.)
-        println!("  key:               {}", hex(&a.key));
-        println!("  SHA384(key):       {}", hex(&psk::key_id(&a.key)));
-    }
     raw("module info (cmd 0x20)", &a.module_info);
     key_id("key id before (cmd 0x28)", &a.key_id_before, None);
     if a.provisioned {
@@ -112,7 +105,7 @@ fn print_attempt(n: usize, a: &HandshakeAttempt) {
     println!("  identity:           {}", identity_verdict(a));
 
     if a.key_id_after.is_some() {
-        key_id("key id after (cmd 0x28)", &a.key_id_after, a.provisioned.then_some(&a.key));
+        key_id("key id after (cmd 0x28)", &a.key_id_after, a.expected_identity.as_ref());
     }
     match &a.error {
         None => println!("  handshake: OK"),
@@ -143,7 +136,7 @@ fn main() -> ExitCode {
         }
     }
     let devpath = positional.first().map_or("/dev/sil6250", |s| s.as_str());
-    let mode_arg = positional.get(1).map_or("auto", |s| s.as_str());
+    let mode_arg = positional.get(1).map_or("provision", |s| s.as_str());
     let Ok(mode) = mode_arg.parse::<PskMode>() else {
         eprintln!("unknown mode '{mode_arg}'\n{USAGE}");
         return ExitCode::from(2);

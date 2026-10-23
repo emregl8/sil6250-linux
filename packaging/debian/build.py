@@ -61,7 +61,8 @@ def main():
         dropin = stage / 'usr/lib/systemd/system/fprintd.service.d/60-sil6250.conf'
         dropin.parent.mkdir(parents=True)
         dropin.write_text('[Service]\nEnvironment=LD_LIBRARY_PATH=/' + str(library_path) +
-                          '\nDeviceAllow=/dev/sil6250 rw\nUMask=0077\n')
+                          '\nEnvironment=SIL6250_PSK_MODE=provision\nDeviceAllow=/dev/sil6250 rw\nUMask=0077\n'
+                          'LimitCORE=0\nCoredumpFilter=0x0\n')
         docs = stage / 'usr/share/doc' / package
         docs.mkdir(parents=True)
         shutil.copyfile(repo / 'LICENSE', docs / 'LICENSE')

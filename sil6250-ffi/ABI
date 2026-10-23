@@ -14,10 +14,13 @@ time. Free it exactly once with sil6250_engine_free. A null handle is accepted
 by free. Arbitrary non-null invalid pointers cannot be validated by this API.
 
 engine_new returns null on invalid configuration or device-open failure.
-It uses upstream's automatic PSK provisioning by default. SIL6250_PSK_MODE
+It requires fresh random PSK provisioning by default; setup and handshake
+failures never fall back to public keys in this mode. SIL6250_PSK_MODE
 accepts auto, provision, replay or legacy. Unknown or non-UTF-8 values fail
-before opening the device. The legacy fallback key remains shiba, preserving the previously tested fallback. Provisioning support does not authenticate the sensor against a
-hardware trust anchor.
+before opening the device. auto, replay and legacy are explicit compatibility
+modes that permit public keys. The legacy fallback key remains shiba.
+Provisioning does not authenticate the sensor against a hardware trust anchor:
+the key blob is obfuscated and recoverable by an observer of the mailbox.
 
 capture requires exactly SIL6250_IMAGE_SIZE bytes. Its return value is 1 for
 a frame, 0 for a timeout and -1 for failure. wait_lift returns false on a

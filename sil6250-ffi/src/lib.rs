@@ -3,6 +3,7 @@
 use std::ffi::{c_char, c_void, CStr};
 use std::ptr;
 use std::time::Duration;
+use zeroize::Zeroizing;
 
 use sil6250::sift::{match_features, MAX_KPTS};
 use sil6250::{Engine, Features, Frame, PskMode, IMG_SIZE};
@@ -14,7 +15,7 @@ struct Gallery(Vec<Features>);
 struct Probe(Features);
 
 fn parse_psk_mode(value: Option<&str>) -> Option<PskMode> {
-    value.map_or(Some(PskMode::Auto), |mode| mode.parse().ok())
+    value.map_or(Some(PskMode::default()), |mode| mode.parse().ok())
 }
 
 #[no_mangle]
@@ -83,6 +84,7 @@ unsafe extern "C" fn sil6250_engine_capture(
     }
     match (*engine).capture_frame(timeout_ms) {
         Ok(frame) => {
+            let frame = Zeroizing::new(frame);
             ptr::copy_nonoverlapping(frame.as_ptr(), raw, IMG_SIZE);
             1
         }
@@ -142,7 +144,7 @@ unsafe extern "C" fn sil6250_frame_extract(
     let Some(frame) = frame_from_slice(std::slice::from_raw_parts(raw, raw_len)) else {
         return -1;
     };
-    let bytes = Features::extract(&frame).serialize();
+    let bytes = Zeroizing::new(Features::extract(&frame).serialize());
     if bytes.len() > capacity {
         return -1;
     }
@@ -307,8 +309,8 @@ mod tests {
     use sil6250::sift::{Keypoint, DESC_DIM};
 
     #[test]
-    fn psk_configuration_uses_upstream_modes() {
-        assert_eq!(parse_psk_mode(None), Some(PskMode::Auto));
+    fn psk_configuration_requires_provisioning_by_default() {
+        assert_eq!(parse_psk_mode(None), Some(PskMode::Provision));
         for (name, expected) in [
             ("auto", PskMode::Auto),
             ("provision", PskMode::Provision),

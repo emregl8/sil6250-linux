@@ -5,6 +5,7 @@ use std::io::{self, Read, Write};
 use std::ptr::NonNull;
 use std::str::FromStr;
 use std::time::{Duration, Instant};
+use zeroize::{Zeroize, Zeroizing};
 
 use openssl::ssl::{HandshakeError, Ssl, SslContext, SslContextBuilder, SslMethod, SslStream,
                    SslVerifyMode, SslVersion};
@@ -67,9 +68,9 @@ static PSK_KEYS: &[PskEntry] = &[
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PskMode {
     /// `Provision`, then `Legacy` if the sensor does not take the key.
-    #[default]
     Auto,
     /// Push a fresh random key to the sensor (cmd 0x27) before each handshake.
+    #[default]
     Provision,
     /// Push the exact blob the Windows driver was traced sending.
     Replay,
@@ -111,6 +112,15 @@ struct KeyPlan {
     blob: Option<[u8; psk::PSK_BLOB_LEN]>,
 }
 
+impl Drop for KeyPlan {
+    fn drop(&mut self) {
+        self.key.zeroize();
+        if let Some(blob) = &mut self.blob {
+            blob.zeroize();
+        }
+    }
+}
+
 impl KeyPlan {
     fn ring(idx: usize) -> Self {
         KeyPlan { name: PSK_KEYS[idx].name, key: PSK_KEYS[idx].key, blob: None }
@@ -138,7 +148,6 @@ pub enum TlsDir {
 pub struct HandshakeAttempt {
     /// `"provision"`, `"replay"`, or the fallback ring key name.
     pub key_name: &'static str,
-    pub key: [u8; 32],
     /// The key was pushed to the sensor with cmd 0x27 first.
     pub provisioned: bool,
     pub module_info: Option<Vec<u8>>,
@@ -446,12 +455,13 @@ fn send_psk(
     att: &mut HandshakeAttempt,
 ) -> io::Result<()> {
     let (be32, payload) = psk::set_psk_args(blob);
+    let payload = Zeroizing::new(payload);
     let mut rx = [0u8; 64];
     // One try only: a missing ack is the caller's cue to fall back, not to
     // push the key again.
     dev.xfer_raw(
         PETAIT_CMD_SET_PSK, psk::SET_PSK_DIR, psk::SET_PSK_WIDTH, psk::SET_PSK_OUTER, be32,
-        &payload, &mut rx, 1, SET_PSK_ACK_MS, 0,
+        &payload[..], &mut rx, 1, SET_PSK_ACK_MS, 0,
     )?;
     // The level IRQ can fire on the previous transaction's leftover and hand
     // us that response again; give the real answer one more window.
@@ -599,10 +609,11 @@ fn request_image(dev: &mut PetaicDev) -> io::Result<()> {
 // ---- TLS session -----------------------------------------------------------
 
 fn build_ssl_context(
-    key: [u8; 32],
+    key: &[u8; 32],
     expected_identity: Option<[u8; psk::IDENTITY_LEN]>,
     verbose: bool,
 ) -> io::Result<SslContext> {
+    let key = Zeroizing::new(*key);
     let mut b = SslContextBuilder::new(SslMethod::tls_server())
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
     b.set_verify(SslVerifyMode::NONE);
@@ -613,10 +624,17 @@ fn build_ssl_context(
     b.set_max_proto_version(Some(SslVersion::TLS1_2))
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
     b.set_psk_server_callback(move |_ssl, identity, psk_buf| {
+        if psk_buf.len() < key.len()
+            || expected_identity.is_some_and(|want| {
+                !identity.is_some_and(|seen| psk::cstr_identity_matches(seen, &want))
+            })
+        {
+            return Ok(0);
+        }
         if verbose {
             // OpenSSL passes the identity as a C string: it stops at the first
             // zero byte, so an unkeyed sensor's all-zero identity shows up
-            // empty. A mismatch is only logged; the Finished MAC decides.
+            // empty. The full identity is checked after the handshake.
             let id = identity.unwrap_or(&[]);
             eprintln!("[engine] sensor PSK identity [{}]: {}", id.len(), hex(id));
             if let Some(want) = &expected_identity {
@@ -627,11 +645,17 @@ fn build_ssl_context(
                 );
             }
         }
-        let len = 32.min(psk_buf.len());
-        psk_buf[..len].copy_from_slice(&key[..len]);
-        Ok(len)
+        psk_buf[..key.len()].copy_from_slice(&key[..]);
+        Ok(key.len())
     });
     Ok(b.build())
+}
+
+fn validate_peer_identity(seen: Option<&[u8]>, expected: Option<&[u8; psk::IDENTITY_LEN]>) -> io::Result<()> {
+    if expected.is_some_and(|want| seen != Some(want.as_slice())) {
+        return Err(io::Error::from_raw_os_error(nix::libc::EPROTO));
+    }
+    Ok(())
 }
 
 fn do_accept(
@@ -724,8 +748,11 @@ impl Engine {
         self.shared.dev.dump_full = v;
     }
 
-    /// Choose where the handshake PSK comes from (default [`PskMode::Auto`]).
+    /// Choose where the handshake PSK comes from (default [`PskMode::Provision`]).
     pub fn set_psk_mode(&mut self, mode: PskMode) {
+        if self.psk_mode != mode {
+            self.session_drop();
+        }
         self.psk_mode = mode;
         self.provision_refused = false;
     }
@@ -784,7 +811,6 @@ impl Engine {
 
         let mut att = HandshakeAttempt {
             key_name: plan.name,
-            key: plan.key,
             provisioned: plan.blob.is_some(),
             module_info: None,
             key_id_before: None,
@@ -794,11 +820,11 @@ impl Engine {
             key_id_after: None,
             tls: Vec::new(),
             identity: None,
-            expected_identity: plan.blob.map(|_| psk::identity(&plan.key)),
+            expected_identity: plan.blob.as_ref().map(|_| psk::identity(&plan.key)),
             error: None,
         };
 
-        let ctx = build_ssl_context(plan.key, att.expected_identity, verbose)?;
+        let ctx = build_ssl_context(&plan.key, att.expected_identity, verbose)?;
         let ssl = Ssl::new(&ctx).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
         let prelude = sc_prelude(
@@ -837,7 +863,7 @@ impl Engine {
                 eprintln!(
                     "[engine] key id readback: {}{}",
                     id.map_or("no valid response".into(), hex),
-                    match (id, plan.blob) {
+                    match (id, plan.blob.as_ref()) {
                         (Some(id), Some(_)) if id == psk::key_id_data(&plan.key) =>
                             " == SHA384(key)",
                         (Some(_), Some(_)) => " != SHA384(key)",
@@ -847,6 +873,10 @@ impl Engine {
             }
         }
 
+        let res = res.and_then(|stream| {
+            validate_peer_identity(att.identity.as_deref(), att.expected_identity.as_ref())?;
+            Ok(stream)
+        });
         let res = match res {
             Ok(stream) => {
                 if verbose {
@@ -963,7 +993,7 @@ impl Engine {
         request_image(&mut self.shared.dev)?;
         self.shared.dev.pause(Duration::from_millis(120))?;
 
-        let mut plain = [0u8; IMG_TOTAL];
+        let mut plain = Zeroizing::new([0u8; IMG_TOTAL]);
         let mut off = 0usize;
         let ssl = self.session.as_mut().unwrap();
         while off < IMG_TOTAL {
@@ -997,13 +1027,13 @@ impl Engine {
     /// Waits up to `finger_ms` for a finger, lazily (re)establishes the TLS
     /// session, and retries on a desynced GCM stream.
     pub fn capture_frame(&mut self, finger_ms: u32) -> io::Result<[u8; IMG_SIZE]> {
-        let mut img = [0u8; IMG_SIZE];
+        let mut img = Zeroizing::new([0u8; IMG_SIZE]);
         for attempt in 0..CAPTURE_ATTEMPTS {
             self.shared.dev.check_control()?;
             self.session_ensure()?;
             let fm = if attempt == 0 { finger_ms } else { 3000 };
             match self.capture_through_session(&mut img, fm) {
-                Ok(()) => { self.shared.dev.check_control()?; return Ok(img); },
+                Ok(()) => { self.shared.dev.check_control()?; return Ok(*img); },
                 Err(ref e) if e.raw_os_error() == Some(nix::libc::ETIMEDOUT) && attempt == 0 => {
                     return Err(io::Error::from_raw_os_error(nix::libc::ETIMEDOUT));
                 }
@@ -1073,12 +1103,18 @@ mod tests {
 
     // Play the sensor: a TLS 1.2 PSK client presenting SHA384(key)[..32].
     fn sensor(sock: UnixStream, key: [u8; 32]) -> std::thread::JoinHandle<bool> {
+        sensor_identity(sock, key, psk::identity(&key))
+    }
+
+    fn sensor_identity(sock: UnixStream, key: [u8; 32], presented: [u8; psk::IDENTITY_LEN]) -> std::thread::JoinHandle<bool> {
+        sock.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        sock.set_write_timeout(Some(Duration::from_secs(3))).unwrap();
         std::thread::spawn(move || {
             let mut b = SslConnector::builder(SslMethod::tls_client()).unwrap();
             b.set_max_proto_version(Some(SslVersion::TLS1_2)).unwrap();
             b.set_cipher_list("PSK-AES256-GCM-SHA384").unwrap();
             b.set_psk_client_callback(move |_ssl, _hint, identity, psk| {
-                identity[..psk::IDENTITY_LEN].copy_from_slice(&psk::identity(&key));
+                identity[..psk::IDENTITY_LEN].copy_from_slice(&presented);
                 identity[psk::IDENTITY_LEN] = 0;
                 psk[..32].copy_from_slice(&key);
                 Ok(32)
@@ -1093,20 +1129,77 @@ mod tests {
         let (host, dev) = UnixStream::pair().unwrap();
         let client = sensor(dev, psk::WINDOWS_KEY);
         let want = psk::identity(&psk::WINDOWS_KEY);
-        let ctx = build_ssl_context(psk::WINDOWS_KEY, Some(want), false).unwrap();
+        let ctx = build_ssl_context(&psk::WINDOWS_KEY, Some(want), false).unwrap();
         let stream = Ssl::new(&ctx).unwrap().accept(Tap(host, Vec::new())).unwrap();
         assert!(client.join().unwrap());
         assert_eq!(stream.ssl().current_cipher().unwrap().name(), "PSK-AES256-GCM-SHA384");
         assert_eq!(psk::client_psk_identity(&stream.get_ref().1).as_deref(), Some(&want[..]));
+        validate_peer_identity(psk::client_psk_identity(&stream.get_ref().1).as_deref(), Some(&want)).unwrap();
     }
 
     #[test]
     fn wrong_key_fails_handshake() {
         let (host, dev) = UnixStream::pair().unwrap();
         let client = sensor(dev, psk::WINDOWS_KEY);
-        let ctx = build_ssl_context(PSK_KEYS[0].key, None, false).unwrap();
+        let ctx = build_ssl_context(&PSK_KEYS[0].key, None, false).unwrap();
         assert!(Ssl::new(&ctx).unwrap().accept(Tap(host, Vec::new())).is_err());
         assert!(!client.join().unwrap());
+    }
+
+    #[test]
+    fn provisioned_session_rejects_public_fallback_key() {
+        let (host, dev) = UnixStream::pair().unwrap();
+        host.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        let key = [0x42; 32];
+        let want = psk::identity(&key);
+        let client = sensor_identity(dev, PSK_KEYS[0].key, want);
+        let ctx = build_ssl_context(&key, Some(want), false).unwrap();
+        assert!(Ssl::new(&ctx).unwrap().accept(host).is_err());
+        assert!(!client.join().unwrap());
+    }
+
+    #[test]
+    fn correct_key_with_wrong_identity_fails_handshake() {
+        let (host, dev) = UnixStream::pair().unwrap();
+        host.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        let key = [0x42; 32];
+        let want = psk::identity(&key);
+        let mut wrong = want;
+        wrong[0] ^= 0x01;
+        let client = sensor_identity(dev, key, wrong);
+        let ctx = build_ssl_context(&key, Some(want), false).unwrap();
+        assert!(Ssl::new(&ctx).unwrap().accept(host).is_err());
+        assert!(!client.join().unwrap());
+    }
+
+    #[test]
+    fn truncated_callback_identity_requires_full_wire_check() {
+        let key = [0x42; 32];
+        let mut want = [0x51; psk::IDENTITY_LEN];
+        want[4] = 0;
+        for mismatch in [false, true] {
+            let (host, dev) = UnixStream::pair().unwrap();
+            host.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            let mut presented = want;
+            if mismatch {
+                presented[5] ^= 0x01;
+            }
+            let client = sensor_identity(dev, key, presented);
+            let ctx = build_ssl_context(&key, Some(want), false).unwrap();
+            let stream = Ssl::new(&ctx).unwrap().accept(Tap(host, Vec::new())).unwrap();
+            assert!(client.join().unwrap());
+            let seen = psk::client_psk_identity(&stream.get_ref().1).unwrap();
+            assert_eq!(seen, want[..4]);
+            assert!(validate_peer_identity(Some(&seen), Some(&want)).is_err());
+            let mut record = vec![0x16, 0x03, 0x03, 0, 38, 0x10, 0, 0, 34, 0, 32];
+            record.extend_from_slice(&presented);
+            let full = psk::client_psk_identity(&record).unwrap();
+            let checked = validate_peer_identity(Some(&full), Some(&want));
+            assert_eq!(checked.is_ok(), !mismatch);
+        }
+        assert!(validate_peer_identity(None, Some(&want)).is_err());
+        assert!(validate_peer_identity(Some(&want[..4]), Some(&want)).is_err());
+        assert!(validate_peer_identity(None, None).is_ok());
     }
 
     #[test]
@@ -1115,6 +1208,6 @@ mod tests {
             assert_eq!(m.as_str().parse::<PskMode>().unwrap(), m);
         }
         assert!("shiba".parse::<PskMode>().is_err());
-        assert_eq!(PskMode::default(), PskMode::Auto);
+        assert_eq!(PskMode::default(), PskMode::Provision);
     }
 }

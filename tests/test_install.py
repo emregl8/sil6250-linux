@@ -65,8 +65,11 @@ class InstallerTests(unittest.TestCase):
         override = self.stage / "etc/systemd/system/fprintd.service.d/60-sil6250.conf"
         self.assertEqual(override.stat().st_mode & 0o777, 0o644)
         self.assertIn("LD_LIBRARY_PATH=/usr/local/lib/sil6250", override.read_text())
+        self.assertIn("Environment=SIL6250_PSK_MODE=provision", override.read_text())
         self.assertIn("DeviceAllow=/dev/sil6250 rw", override.read_text())
         self.assertIn("UMask=0077", override.read_text())
+        self.assertIn("LimitCORE=0", override.read_text())
+        self.assertIn("CoredumpFilter=0x0", override.read_text())
         self.assertNotIn("ExecStart", override.read_text())
         self.assert_no_system_commands()
 
