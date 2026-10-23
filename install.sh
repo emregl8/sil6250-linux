@@ -5,6 +5,7 @@ HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_ROOT="${BUILD_ROOT:-$HERE/build/native}"
 PREFIX="${PREFIX:-/usr/local}"
 export BUILD_ROOT
+export PATH="$PATH:/usr/sbin:/sbin"
 
 log() { printf '%s\n' "$*"; }
 warn() { printf '%s\n' "$*" >&2; }
@@ -64,21 +65,27 @@ stage_check() {
     [[ -c /dev/sil6250 ]] || warn 'The SIL6250 device node is not present.'
 }
 
-stage_kernel() {
+stage_kernel() (
+  local temporary base_version kernelver
+  kernelver=${KERNEL_VERSION:-$(uname -r)}
+  [[ "$kernelver" =~ ^[A-Za-z0-9._+-]+$ ]] || die 'Invalid kernel version.'
+  temporary=$(mktemp -d)
+  trap 'rm -rf -- "$temporary"' EXIT
+  local sources=(Makefile dkms.conf sil6250.c sil6250_irq.h sil6250_uapi.h)
+  local name
+  for name in "${sources[@]}"; do
+    cp -- "$HERE/kernel/$name" "$temporary/"
+  done
+  base_version=$(sed -n 's/^PACKAGE_VERSION="\(.*\)"/\1/p' "$temporary/dkms.conf")
+  [[ "$base_version" =~ ^[0-9][A-Za-z0-9._+-]*$ ]] || die 'Invalid DKMS package version.'
   log "Building + installing the sil6250 kernel module"
+  make -C "$temporary" KDIR="/lib/modules/$kernelver/build" ${LLVM+LLVM="$LLVM"}
   if command -v dkms >/dev/null 2>&1; then
-    local ver
-    ver="$(sed -n 's/^PACKAGE_VERSION="\(.*\)"/\1/p' "$HERE/kernel/dkms.conf")"
-    as_root rm -rf "/usr/src/sil6250-${ver}"
-    as_root cp -r "$HERE/kernel" "/usr/src/sil6250-${ver}"
-    as_root dkms add    "sil6250/${ver}"
-    as_root dkms build  "sil6250/${ver}"
-    as_root dkms install "sil6250/${ver}" --force
+    as_root bash "$HERE/integrations/kernel/install-dkms.sh" "$temporary" "$base_version" "$kernelver"
   else
     warn "dkms not found; building out-of-tree (won't survive kernel upgrades)"
-    make -C "$HERE/kernel" ${LLVM+LLVM="$LLVM"}
-    as_root make -C "$HERE/kernel" modules_install
-    as_root depmod -a
+    as_root make -C "$temporary" KDIR="/lib/modules/$kernelver/build" modules_install
+    as_root depmod -a "$kernelver"
   fi
 
   log "Installing udev rule (/dev/sil6250 permissions)"
@@ -86,6 +93,15 @@ stage_kernel() {
     /etc/udev/rules.d/69-sil6250.rules
   as_root udevadm control --reload
 
+  if [[ "$kernelver" != "$(uname -r)" ]]; then
+    log "Installed for kernel $kernelver; the running kernel was not changed."
+    return
+  fi
+  if grep -q '^sil6250 ' /proc/modules; then
+    log 'SIL6250 is already loaded; it was not unloaded or replaced in memory.'
+    log 'A user-initiated reboot is required to activate changed module code.'
+    return
+  fi
   log "Loading the module"
   local mperr
   if ! mperr="$(as_root modprobe sil6250 2>&1)"; then
@@ -99,9 +115,10 @@ stage_kernel() {
     else
       warn "modprobe failed (no SIL6250 ACPI device on this machine?): ${mperr:-unknown error}"
     fi
+    return 1
   fi
-  as_root udevadm trigger -s misc || true
-}
+  as_root udevadm trigger -s misc
+)
 
 secure_boot_enabled() {
   if command -v mokutil >/dev/null 2>&1; then

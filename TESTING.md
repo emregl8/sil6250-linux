@@ -7,6 +7,7 @@ cargo test --workspace --locked
 cargo test --workspace --locked --release
 cargo clippy -p sil6250-ffi --all-targets --no-deps -- -D warnings
 python3 tests/test_install.py
+python3 tests/test_kernel_install.py
 ./install.sh build
 ```
 
@@ -45,6 +46,30 @@ enable, that the controller starts once, and that subsequent notifications
 remain deliverable. The wrapper refuses execution outside a VM or when
 `/dev/sil6250` exists. This synthetic controller does not test physical GPIO,
 ACPI routing, or sensor behavior.
+
+## DKMS lifecycle
+
+In a fresh disposable VM without a SIL6250 device or existing SIL6250 DKMS
+registrations, install DKMS and headers for two kernels, then run as a regular
+user with sudo available:
+
+```sh
+bash tests/kernel/dkms-lifecycle.sh kernel-version-1 kernel-version-2
+```
+
+This installs real modules inside the VM. It checks repeated installation,
+changed sources, automatic selection for a second kernel, preservation of older
+sources, and restoration after an injected installation failure. Failure is
+injected both after a real replacement installation and after corrupting the
+on-disk module; the restored file must match the original hash. It also corrupts
+and removes installed files, removes a cached build artifact, and checks repair
+when installing the same sources again. Two additional cases kill the installer
+with SIGKILL before installation and after an installation followed by a torn
+module copy; rerunning the installer must produce a consistent installation.
+These controlled process interruptions do not simulate filesystem damage or
+prove automatic recovery or continuous availability after a power failure.
+The test leaves DKMS state in the disposable VM. Never use the host as this
+test environment.
 
 ## Temporary memory
 
