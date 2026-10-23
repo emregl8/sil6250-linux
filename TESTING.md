@@ -10,6 +10,7 @@ python3 tests/test_install.py
 python3 tests/test_kernel_install.py
 python3 tests/test_runtime.py
 python3 tests/test_package.py
+python3 tests/test_verification_report.py
 ./install.sh build
 ```
 
@@ -122,6 +123,13 @@ Use an isolated fprintd instance and a protected copy of enrollment records
 before updating a working authentication service. Check registered fingers,
 unregistered fingers, repeated placement, cancellation, client disconnect and
 service reactivation. Test reboot and suspend separately with the user's consent.
+For a new kernel, record the installed module's path, vermagic and srcversion
+before reboot; after explicit reboot consent, compare the running kernel and
+`/sys/module/sil6250/srcversion`, then repeat genuine and impostor checks.
+For suspend/resume, record the same information and functional results before
+and after a user-approved cycle. Include cancellation during a pending scan and
+subsequent service reactivation. Compilation and VM IRQ tests do not count as
+physical suspend, hibernation or new-kernel boot validation.
 
 Record first-attempt and final results separately: one verification can accept
 up to three distinct placements. Measure latency from both request and finger
@@ -133,6 +141,26 @@ acceptance estimate or a spoof-resistance certification. A wider evaluation
 requires consented independent participants, separate enrollment and probe
 samples, and a stated number of genuine and impostor comparisons. Do not tune
 and evaluate a threshold using the same samples.
+
+Summarize consented trial results without storing raw biometric data in reports:
+
+```sh
+python3 tools/summarize_verification.py /protected/path/trials.csv --threshold 5
+```
+
+The CSV columns are `trial_id,kind,result,first_result,attempts,latency_ms`.
+Use pseudonymous unique trial IDs, `genuine` or `impostor` for kind, and `match`,
+`no-match`, `timeout`, `error` or `cancelled` for results. Record the first
+placement separately and use zero attempts if no placement was captured.
+Latency is measured from the verification request to its final result.
+The threshold argument records the threshold used; it does not change it.
+The report separates first-placement and final error rates, reports timeouts,
+errors and cancellations separately, and gives median/p95 latency by outcome.
+FAR/FRR denominators include completed match/no-match comparisons only; review
+the other outcome counts alongside them. Wilson intervals assume independent
+trials; repeated placements from one person do not establish population rates.
+Zero observed false accepts is not proof of zero risk. No trial IDs or images
+are included in the generated aggregate report.
 
 ## Local Debian packages
 
