@@ -18,6 +18,58 @@ The native build runs libfprint's available tests, including SIL6250's mocked
 capture, cancellation, enrollment and identification tests. A skipped device
 replay test is not a hardware test pass.
 
+## Distribution coverage
+
+The CI native matrix covers Debian 13 and Fedora 44 with GCC, and Ubuntu 24.04
+with both GCC and Clang. Each configuration runs debug and release Rust tests,
+the FFI Clippy check, installer tests, C/C++ ABI checks, the libfprint tests,
+private-bus fprintd permission checks, and C AddressSanitizer/UndefinedBehaviorSanitizer
+tests. Debian and Ubuntu also build the development Debian package. Logs are
+retained as CI artifacts; packages and biometric data are not uploaded.
+The patch set corrects callback signatures in libfprint's test helpers so
+Clang's function-type sanitizer checks can remain enabled.
+Dependency auditing checks both the workspace and fuzzing lockfiles.
+
+The SIL6250 suite runs ten additional times on one CPU to exercise asynchronous
+cleanup. Set `SIL6250_TEST_REPEATS` to 1..999 to change the repetition count.
+Production-library checks reject unexpected SONAMEs, embedded runtime search
+paths, sanitizer dependencies or symbols, executables, and mismatched ELF class,
+byte order or processor. The architecture reference defaults to the Python
+interpreter; `tools/check_runtime.py --reference /path/to/target/fprintd LIBDIR`
+allows explicit inspection against another target without executing its code.
+Debian packaging is native-only and rejects a different `DEB_HOST_ARCH`.
+The guard tests use compiled ELF
+fixtures with those defects. The same guard checks the copied libraries before
+staging or Debian packaging publishes its output; rejection removes the
+temporary output. Package guard tests require Debian's packaging tools and
+skip when those tools are unavailable.
+
+With build dependencies and a current Rust toolchain installed, run the same
+native checks as a regular user in a disposable checkout:
+
+```sh
+BUILD_ROOT="$PWD/build/compatibility" bash tests/ci/native.sh
+```
+
+Use a fresh `BUILD_ROOT`: the final test step enables C sanitizers in that
+build directory. `tests/ci/install-deps.sh` installs distribution packages and
+is intended only for disposable CI containers or test VMs.
+
+A separate CI matrix compiles the kernel module against each distribution's
+packaged headers with extra warnings treated as errors. To use installed
+headers locally, without installing or loading a module:
+
+```sh
+bash tests/ci/kernel.sh
+bash tests/ci/kernel.sh /path/to/configured/kernel/headers
+```
+
+The helper copies module sources to a temporary directory and saves build logs
+and module metadata under `build/kernel-logs`. Distribution containers share the
+runner's kernel; header compilation does not test the resulting module at
+runtime. These checks do not establish desktop integration, suspend/resume,
+Secure Boot enrollment, or reliability on another physical sensor.
+
 ## IRQ startup regression
 
 The IRQ runtime CI job boots a packaged kernel under QEMU using a small

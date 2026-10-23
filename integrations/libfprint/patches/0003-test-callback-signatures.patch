@@ -1,0 +1,61 @@
+diff --git a/tests/test-fpi-ssm.c b/tests/test-fpi-ssm.c
+--- a/tests/test-fpi-ssm.c
++++ b/tests/test-fpi-ssm.c
+@@ -78,8 +78,10 @@
+ G_DEFINE_AUTOPTR_CLEANUP_FUNC (FpiSsmTestData, fpi_ssm_test_data_unref)
+ 
+ static void
+-fpi_ssm_test_data_unref_by_ssm (FpiSsmTestData *data)
+-{
++fpi_ssm_test_data_unref_by_ssm (gpointer user_data)
++{
++  FpiSsmTestData *data = user_data;
++
+   data->ssm_destroyed = TRUE;
+ 
+   fpi_ssm_test_data_unref (data);
+@@ -137,7 +139,7 @@
+   ssm = fpi_ssm_new_full (fake_device, test_ssm_handler, nr_states, cleanup_state, name);
+   data = fpi_ssm_test_data_new ();
+   data->expected_last_state = nr_states;
+-  fpi_ssm_set_data (ssm, data, (GDestroyNotify) fpi_ssm_test_data_unref_by_ssm);
++  fpi_ssm_set_data (ssm, data, fpi_ssm_test_data_unref_by_ssm);
+ 
+   return ssm;
+ }
+diff --git a/tests/test-fpi-device.c b/tests/test-fpi-device.c
+--- a/tests/test-fpi-device.c
++++ b/tests/test-fpi-device.c
+@@ -2669,6 +2669,14 @@
+ }
+ 
+ static void
++test_driver_identify_timeout (FpDevice *device, gpointer user_data)
++{
++  void (**identify) (FpDevice *) = user_data;
++
++  (*identify) (device);
++}
++
++static void
+ test_driver_identify_suspend_succeeds (void)
+ {
+   g_autoptr(FpAutoResetClass) dev_class = auto_reset_device_class ();
+@@ -2707,7 +2715,7 @@
+   /* suspend_sync hangs until cancellation, so we need to trigger orig_identify
+    * from the mainloop after calling suspend_sync.
+    */
+-  fpi_device_add_timeout (device, 0, (FpTimeoutFunc) orig_identify, NULL, NULL);
++  fpi_device_add_timeout (device, 0, test_driver_identify_timeout, &orig_identify, NULL);
+ 
+   fake_dev->ret_suspend = fpi_device_error_new (FP_DEVICE_ERROR_NOT_SUPPORTED);
+   fp_device_suspend_sync (device, NULL, &error);
+@@ -2770,7 +2778,7 @@
+   /* suspend_sync hangs until cancellation, so we need to trigger orig_identify
+    * from the mainloop after calling suspend_sync.
+    */
+-  fpi_device_add_timeout (device, 0, (FpTimeoutFunc) orig_identify, NULL, NULL);
++  fpi_device_add_timeout (device, 0, test_driver_identify_timeout, &orig_identify, NULL);
+ 
+   fake_dev->ret_suspend = fpi_device_error_new (FP_DEVICE_ERROR_NOT_SUPPORTED);
+   fp_device_suspend_sync (device, NULL, &error);

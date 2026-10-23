@@ -3,52 +3,141 @@ name: Tests
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
   native:
+    name: Native (${{ matrix.id }})
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    container: ${{ matrix.image }}
+    timeout-minutes: 35
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: ubuntu24-gcc
+            image: ubuntu:24.04
+            cc: gcc
+            cxx: g++
+          - id: ubuntu24-clang
+            image: ubuntu:24.04
+            cc: clang
+            cxx: clang++
+          - id: debian13-gcc
+            image: debian:13
+            cc: gcc
+            cxx: g++
+          - id: fedora44-gcc
+            image: fedora:44
+            cc: gcc
+            cxx: g++
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           persist-credentials: false
-      - run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config libssl-dev libgusb-dev libgudev-1.0-dev libpixman-1-dev meson ninja-build dbus python3-dbus python3-gi fprintd dpkg-dev
-          rustup toolchain install stable --profile minimal --component clippy
-      - run: |
-          cargo +stable test --workspace --locked
-          cargo +stable test --workspace --locked --release
-          cargo +stable clippy -p sil6250-ffi --all-targets --no-deps -- -D warnings
-          python3 tests/test_install.py
-      - run: ./install.sh build
-      - name: Check cleanup on one CPU
+      - run: bash tests/ci/install-deps.sh native
+      - name: Prepare unprivileged build user
         run: |
-          first_cpu="$(python3 -c 'import os; print(min(os.sched_getaffinity(0)))')"
-          taskset -c "$first_cpu" build/native/meson/tests/test-sil6250
+          useradd --create-home --shell /bin/bash builder
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+          curl --proto '=https' --tlsv1.2 -fsS https://sh.rustup.rs -o /tmp/rustup-init.sh
+          runuser -u builder -- sh /tmp/rustup-init.sh -y --profile minimal --default-toolchain stable --component clippy
+      - name: Build and test
+        env:
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
+        run: runuser -u builder -- bash tests/ci/native.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: native-logs-${{ matrix.id }}
+          path: |
+            build/native/logs/*.log
+            build/native/meson/meson-logs/*.txt
+            build/native/policy/meson-logs/*.txt
+          if-no-files-found: ignore
+          retention-days: 14
+
+  kernel:
+    name: Kernel (${{ matrix.id }})
+    runs-on: ubuntu-24.04
+    container: ${{ matrix.image }}
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: ubuntu24
+            image: ubuntu:24.04
+          - id: debian13
+            image: debian:13
+          - id: fedora44
+            image: fedora:44
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - run: bash tests/ci/install-deps.sh kernel
       - run: |
-          export FPRINTD="$(dpkg -L fprintd | sed -n '\|/fprintd$|p' | while read -r file; do if [ -f "$file" ] && [ -x "$file" ]; then printf '%s\n' "$file"; break; fi; done)"
-          tests/run_permissions.sh
-      - run: python3 packaging/debian/build.py --maintainer 'emregl8 <emregl246@outlook.com.tr>'
-      - run: |
-          meson configure build/native/meson -Db_sanitize=address,undefined -Db_lundef=false
-          meson compile -C build/native/meson
-          ASAN_OPTIONS=detect_leaks=0 meson test -C build/native/meson --suite unit-tests --print-errorlogs
+          useradd --create-home --shell /bin/bash builder
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+          runuser -u builder -- bash tests/ci/kernel.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: kernel-logs-${{ matrix.id }}
+          path: build/kernel-logs/*.log
+          if-no-files-found: ignore
+          retention-days: 14
+
+  kernel-runtime:
+    name: IRQ runtime (QEMU)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - name: Install guest kernel and tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends linux-image-virtual linux-headers-virtual busybox-static qemu-system-x86 cpio fakeroot libelf-dev
+      - name: Run positive and mutation controls in QEMU
+        run: |
+          kernel=$(find /boot -maxdepth 1 -name 'vmlinuz-*-generic' | sort -V | tail -n 1)
+          test -n "$kernel"
+          version=${kernel#/boot/vmlinuz-}
+          sudo install -m 0644 "$kernel" "$RUNNER_TEMP/irq-test-kernel"
+          bash tests/ci/irq-vm.sh "$RUNNER_TEMP/irq-test-kernel" "/lib/modules/$version/build"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: kernel-runtime-logs
+          path: build/kernel-runtime/*.log
+          if-no-files-found: ignore
+          retention-days: 14
 
   dependencies:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           persist-credentials: false
       - run: |
           rustup toolchain install stable --profile minimal
           cargo +stable install cargo-audit --locked
           cargo +stable audit --deny warnings
+          cargo +stable audit --file fuzz/Cargo.lock --deny warnings
 
   fuzz:
     runs-on: ubuntu-24.04
@@ -58,7 +147,7 @@ jobs:
       matrix:
         target: [parsers, gallery, images]
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           persist-credentials: false
       - run: |

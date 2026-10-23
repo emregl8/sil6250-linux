@@ -17,7 +17,8 @@ meson_build="$build_root/meson"
 meson="${MESON:-meson}"
 revision="$(cat "$here/revision")"
 patches=("$here/patches/0001-misc-device-discovery.patch"
-         "$here/patches/0002-sil6250-driver.patch")
+         "$here/patches/0002-sil6250-driver.patch"
+         "$here/patches/0003-test-callback-signatures.patch")
 
 if [[ ! -e "$source_dir" ]]; then
     git clone --no-checkout https://gitlab.freedesktop.org/libfprint/libfprint.git "$source_dir"
