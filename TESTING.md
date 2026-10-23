@@ -14,6 +14,38 @@ The native build runs libfprint's available tests, including SIL6250's mocked
 capture, cancellation, enrollment and identification tests. A skipped device
 replay test is not a hardware test pass.
 
+## IRQ startup regression
+
+The IRQ runtime CI job boots a packaged kernel under QEMU using a small
+BusyBox initramfs. It loads the regression module only inside that guest,
+then requires a copy without `IRQF_NO_AUTOEN` to fail with `EPROTO`. To run
+the same check locally as a regular user, install QEMU, static BusyBox,
+fakeroot, cpio and matching kernel headers:
+
+```sh
+bash tests/ci/irq-vm.sh /path/to/vmlinuz /path/to/configured/kernel/headers
+```
+
+This uses CPU emulation without requiring KVM, network access, a guest disk,
+or privileged host module loading. Logs are saved under `build/kernel-runtime`.
+
+The kernel build helper also compiles the synthetic IRQ regression module.
+To execute it, use a disposable VM with headers matching its running kernel
+and no SIL6250 device attached:
+
+```sh
+make -C tests/kernel
+sudo bash tests/kernel/run.sh "$PWD/tests/kernel/irq_startup_test.ko"
+```
+
+The test reproduces the original double-disable startup race, then exercises
+the driver's masked IRQ registration and rearming through the real kernel IRQ
+core 64 times. It checks that early notifications stay pending until the first
+enable, that the controller starts once, and that subsequent notifications
+remain deliverable. The wrapper refuses execution outside a VM or when
+`/dev/sil6250` exists. This synthetic controller does not test physical GPIO,
+ACPI routing, or sensor behavior.
+
 ## Temporary memory
 
 Rust uses `zeroize` for owned PSK plans, callback keys, transmit buffers,

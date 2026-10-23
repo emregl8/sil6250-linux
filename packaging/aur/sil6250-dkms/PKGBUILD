@@ -36,7 +36,8 @@ package() {
   # Kernel module source + Makefile + dkms.conf go to /usr/src; the dkms
   # alpm hook (shipped by the dkms package) builds + installs from here.
   install -dm755 "${dest}"
-  install -m644 kernel/sil6250.c kernel/sil6250_uapi.h kernel/Makefile "${dest}/"
+  install -m644 kernel/sil6250.c kernel/sil6250_uapi.h kernel/sil6250_irq.h \
+    kernel/Makefile "${dest}/"
 
   # The directory under /usr/src is named with the full VCS pkgver, so the
   # PACKAGE_VERSION in dkms.conf must match or `dkms add` won't find it.

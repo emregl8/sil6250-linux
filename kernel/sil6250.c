@@ -29,9 +29,11 @@
 #include <linux/platform_device.h>
 #include <linux/slab.h>
 #include <linux/uaccess.h>
+#include <linux/version.h>
 #include <linux/wait.h>
 
 #include "sil6250_uapi.h"
+#include "sil6250_irq.h"
 
 #define SIL6250_DRV_NAME "sil6250"
 #define SIL6250_WAIT_DEFAULT_MS	500
@@ -412,16 +414,10 @@ static int sil6250_probe(struct platform_device *pdev)
 		irq_set_irq_type(s->irq, IRQ_TYPE_LEVEL_HIGH);
 	}
 
-	/* Request enabled (so the core fully sets up the line), then mask:
-	 * gives a known masked initial state with a balanced first enable_irq()
-	 * in SIL6250_WAIT_IRQ. */
-	ret = devm_request_threaded_irq(&pdev->dev, s->irq, NULL,
-					sil6250_irq_thread, IRQF_ONESHOT,
-					SIL6250_DRV_NAME, s);
+	ret = sil6250_request_masked_irq(&pdev->dev, s->irq,
+					 sil6250_irq_thread, SIL6250_DRV_NAME, s);
 	if (ret)
 		return dev_err_probe(&pdev->dev, ret, "request_irq\n");
-	disable_irq(s->irq);
-	s->irq_masked = true;
 
 	s->misc.minor = MISC_DYNAMIC_MINOR;
 	s->misc.name = SIL6250_DRV_NAME;
@@ -468,7 +464,11 @@ static struct platform_driver sil6250_driver = {
 		.acpi_match_table = sil6250_acpi_ids,
 	},
 	.probe = sil6250_probe,
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 11, 0)
+	.remove_new = sil6250_remove,
+#else
 	.remove = sil6250_remove,
+#endif
 };
 module_platform_driver(sil6250_driver);
 

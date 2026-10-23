@@ -21,9 +21,9 @@ make                       # builds against the running kernel
 sudo make modules_install && sudo depmod -a
 ```
 
-This kernel Makefile defaults to `LLVM=1` because some distro kernels (e.g.
-CachyOS) are clang-built and out-of-tree modules must match the compiler. **If
-your kernel was built with gcc, use `make LLVM=`.**
+The Makefile detects Clang-built kernels and selects `LLVM=1` automatically.
+GCC-built kernels use the default toolchain. Override with `make LLVM=1` or
+`make LLVM=` when needed to match the target kernel's compiler.
 
 ## DKMS (survives kernel upgrades)
 
