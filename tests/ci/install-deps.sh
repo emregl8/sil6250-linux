@@ -9,7 +9,7 @@ source /etc/os-release
 case "$ID" in
     debian|ubuntu)
         export DEBIAN_FRONTEND=noninteractive
-        packages=(ca-certificates curl git build-essential pkg-config binutils util-linux)
+        packages=(ca-certificates curl git python3 build-essential pkg-config binutils util-linux)
         if [[ $mode != kernel ]]; then
             packages+=(libssl-dev libglib2.0-dev libgusb-dev libgudev-1.0-dev
                 libpixman-1-dev libcairo2-dev meson ninja-build dbus python3-dbus
@@ -27,7 +27,7 @@ case "$ID" in
         apt-get install -y --no-install-recommends "${packages[@]}"
         ;;
     fedora)
-        packages=(ca-certificates curl-minimal git-core gcc gcc-c++ make
+        packages=(ca-certificates curl-minimal git-core python3 gcc gcc-c++ make
             pkgconf-pkg-config binutils util-linux shadow-utils diffutils findutils)
         if [[ $mode != kernel ]]; then
             packages+=(openssl-devel glib2-devel libgusb-devel libgudev-devel

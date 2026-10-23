@@ -38,6 +38,15 @@ jobs:
             cc: gcc
             cxx: g++
     steps:
+      - name: Prepare checkout tools
+        run: |
+          if command -v apt-get >/dev/null 2>&1; then
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update
+            apt-get install -y --no-install-recommends ca-certificates git
+          else
+            dnf install -y --setopt=install_weak_deps=False ca-certificates git-core
+          fi
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           persist-credentials: false
@@ -83,6 +92,15 @@ jobs:
           - id: fedora44
             image: fedora:44
     steps:
+      - name: Prepare checkout tools
+        run: |
+          if command -v apt-get >/dev/null 2>&1; then
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update
+            apt-get install -y --no-install-recommends ca-certificates git
+          else
+            dnf install -y --setopt=install_weak_deps=False ca-certificates git-core
+          fi
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           persist-credentials: false
