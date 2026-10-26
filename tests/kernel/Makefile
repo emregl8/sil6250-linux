@@ -1,4 +1,5 @@
 obj-m += irq_startup_test.o
+obj-m += lifetime_test.o
 SIL6250_KERNEL_DIR ?= $(src)/../../kernel
 ccflags-y += -I$(SIL6250_KERNEL_DIR)
 

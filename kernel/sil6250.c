@@ -287,8 +287,10 @@ static int sil6250_release(struct inode *inode, struct file *file)
 {
 	struct sil6250 *s = sil6250_from_file(file);
 
+	mutex_lock(&s->lifecycle_lock);
 	if (atomic_dec_and_test(&s->users))
 		wake_up_all(&s->users_wait);
+	mutex_unlock(&s->lifecycle_lock);
 	return 0;
 }
 
@@ -450,6 +452,8 @@ static void sil6250_remove(struct platform_device *pdev)
 	mutex_unlock(&s->irq_lock);
 	synchronize_irq(s->irq);
 	wait_event(s->users_wait, atomic_read(&s->users) == 0);
+	mutex_lock(&s->lifecycle_lock);
+	mutex_unlock(&s->lifecycle_lock);
 }
 
 static const struct acpi_device_id sil6250_acpi_ids[] = {

@@ -118,7 +118,7 @@ jobs:
           retention-days: 14
 
   kernel-runtime:
-    name: IRQ runtime (QEMU)
+    name: Kernel runtime (QEMU)
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:

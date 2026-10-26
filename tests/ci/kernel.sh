@@ -32,7 +32,8 @@ for index in "${!headers[@]}"; do
     modinfo "$module/sil6250.ko" | tee "$logs/module-$index.log"
     regression="$work/test-$index"
     mkdir -- "$regression"
-    cp -- "$repo/tests/kernel/Makefile" "$repo/tests/kernel/irq_startup_test.c" "$regression/"
+    cp -- "$repo/tests/kernel/Makefile" "$repo/tests/kernel/irq_startup_test.c" \
+        "$repo/tests/kernel/lifetime_test.c" "$regression/"
     make -C "$regression" KDIR="$directory" SIL6250_KERNEL_DIR="$repo/kernel" -j2 \
-        2>&1 | tee "$logs/irq-test-build-$index.log"
+        2>&1 | tee "$logs/regression-build-$index.log"
 done

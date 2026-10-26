@@ -70,13 +70,17 @@ runner's kernel; header compilation does not test the resulting module at
 runtime. These checks do not establish desktop integration, suspend/resume,
 Secure Boot enrollment, or reliability on another physical sensor.
 
-## IRQ startup regression
+## Kernel runtime regressions
 
-The IRQ runtime CI job boots a packaged kernel under QEMU using a small
-BusyBox initramfs. It loads the regression module only inside that guest,
-then requires a copy without `IRQF_NO_AUTOEN` to fail with `EPROTO`. To run
-the same check locally as a regular user, install QEMU, static BusyBox,
-fakeroot, cpio and matching kernel headers:
+The kernel runtime CI job boots a packaged kernel under QEMU using a small
+BusyBox initramfs. It loads both regression modules only inside that guest.
+The IRQ test requires a copy without `IRQF_NO_AUTOEN` to fail with `EPROTO`.
+The lifetime test includes the production kernel source and schedules the
+last file close against device removal in both orders, with one and four open
+files. It requires separate copies without either half of the close/removal
+synchronization to fail with `EPROTO`. To run the same checks locally as a
+regular user, install QEMU, static BusyBox, fakeroot, cpio, Python 3 and
+matching kernel headers:
 
 ```sh
 bash tests/ci/irq-vm.sh /path/to/vmlinuz /path/to/configured/kernel/headers
@@ -85,22 +89,28 @@ bash tests/ci/irq-vm.sh /path/to/vmlinuz /path/to/configured/kernel/headers
 This uses CPU emulation without requiring KVM, network access, a guest disk,
 or privileged host module loading. Logs are saved under `build/kernel-runtime`.
 
-The kernel build helper also compiles the synthetic IRQ regression module.
-To execute it, use a disposable VM with headers matching its running kernel
-and no SIL6250 device attached:
+The kernel build helper also compiles both regression modules. To execute
+either one, use a disposable VM with headers matching its running kernel and
+no SIL6250 device attached:
 
 ```sh
 make -C tests/kernel
 sudo bash tests/kernel/run.sh "$PWD/tests/kernel/irq_startup_test.ko"
+sudo bash tests/kernel/run.sh "$PWD/tests/kernel/lifetime_test.ko"
 ```
 
-The test reproduces the original double-disable startup race, then exercises
+The IRQ test reproduces the original double-disable startup race, then exercises
 the driver's masked IRQ registration and rearming through the real kernel IRQ
 core 64 times. It checks that early notifications stay pending until the first
 enable, that the controller starts once, and that subsequent notifications
 remain deliverable. The wrapper refuses execution outside a VM or when
 `/dev/sil6250` exists. This synthetic controller does not test physical GPIO,
 ACPI routing, or sensor behavior.
+
+The lifetime test uses a synthetic platform device and no physical sensor.
+It checks that removal cannot finish while the last close is still using the
+device state. It does not unbind the host device or measure physical sensor
+behavior.
 
 ## DKMS lifecycle
 
