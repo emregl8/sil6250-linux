@@ -2,7 +2,7 @@ diff --git a/libfprint/drivers/sil6250.c b/libfprint/drivers/sil6250.c
 new file mode 100644
 --- /dev/null
 +++ b/libfprint/drivers/sil6250.c
-@@ -0,0 +1,587 @@
+@@ -0,0 +1,627 @@
 +/* SPDX-License-Identifier: LGPL-2.1-or-later */
 +
 +#define FP_COMPONENT "sil6250"
@@ -23,6 +23,7 @@ new file mode 100644
 +#define MAX_REDUNDANT (ENROLL_STAGES * 4)
 +#define VERIFY_SCANS 3
 +#define VERIFY_RETRY_SECONDS 8
++#define REOPEN_ATTEMPTS 5
 +
 +typedef guint8 RawImage[SIL6250_IMAGE_SIZE];
 +typedef guint8 FeatureBuffer[SIL6250_MAX_FEATURE_SIZE];
@@ -205,6 +206,7 @@ new file mode 100644
 +  guint accepted = 0;
 +  guint redundant = 0;
 +  guint scanned = 0;
++  guint recoveries = 0;
 +  gint64 deadline;
 +  gint64 retry_deadline;
 +
@@ -247,6 +249,40 @@ new file mode 100644
 +
 +      if (g_cancellable_is_cancelled (cancellable))
 +        break;
++      if (captured == SIL6250_CAPTURE_STALE ||
++          (captured < 0 && recoveries > 0 && recoveries < REOPEN_ATTEMPTS))
++        {
++          if (++recoveries > REOPEN_ATTEMPTS)
++            {
++              g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_FAILED,
++                                       "SIL6250 sensor did not recover after sleep");
++              goto out;
++            }
++          sil6250_engine_free (engine);
++          engine = NULL;
++          for (guint attempt = 0; attempt < REOPEN_ATTEMPTS &&
++               !g_cancellable_is_cancelled (cancellable) &&
++               g_get_monotonic_time () < deadline; attempt++)
++            {
++              engine = sil6250_engine_new (op->path);
++              if (engine != NULL &&
++                  sil6250_engine_set_control (engine,
++                                              MAX (1, (deadline - g_get_monotonic_time ()) / 1000),
++                                              scan_cancelled, cancellable))
++                break;
++              g_clear_pointer (&engine, sil6250_engine_free);
++              g_usleep (100000);
++            }
++          if (engine == NULL && !g_cancellable_is_cancelled (cancellable))
++            {
++              g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_FAILED,
++                                       "Could not reopen SIL6250 sensor after sleep");
++              goto out;
++            }
++          if (engine == NULL)
++            break;
++          continue;
++        }
 +      if (captured < 0)
 +        {
 +          g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_FAILED,
@@ -254,7 +290,11 @@ new file mode 100644
 +          goto out;
 +        }
 +      if (captured == 0)
-+        continue;
++        {
++          recoveries = 0;
++          continue;
++        }
++      recoveries = 0;
 +      if (g_cancellable_is_cancelled (cancellable))
 +        break;
 +
@@ -683,7 +723,7 @@ new file mode 100644
 index 00000000..34f565f3
 --- /dev/null
 +++ b/tests/test-sil6250.c
-@@ -0,0 +1,563 @@
+@@ -0,0 +1,600 @@
 +/* SPDX-License-Identifier: LGPL-2.1-or-later */
 +
 +#include "drivers_api.h"
@@ -712,6 +752,8 @@ index 00000000..34f565f3
 +  gfloat qualities[4];
 +  gboolean open_error;
 +  gboolean capture_error;
++  guint stale_captures;
++  guint transient_error_at;
 +  gboolean no_frame;
 +  gboolean lift_error;
 +  gboolean cancel_score;
@@ -772,6 +814,10 @@ index 00000000..34f565f3
 +      return -1;
 +    }
 +  if (mock.capture_error)
++    return -1;
++  if (index < mock.stale_captures)
++    return SIL6250_CAPTURE_STALE;
++  if (index + 1 == mock.transient_error_at)
 +    return -1;
 +  if (mock.no_frame)
 +    {
@@ -1106,6 +1152,35 @@ index 00000000..34f565f3
 +}
 +
 +static void
++test_sleep_reopens_engine (Fixture *fixture, gconstpointer data)
++{
++  g_autoptr(GError) error = NULL;
++  gboolean match = FALSE;
++  (void) data;
++  mock.stale_captures = 1;
++  g_assert_true (verify (fixture, &match, &error));
++  g_assert_no_error (error);
++  g_assert_true (match);
++  g_assert_cmpint (mock.opened, ==, 2);
++  g_assert_cmpint (mock.freed, ==, 2);
++}
++
++static void
++test_sleep_retries_initial_capture (Fixture *fixture, gconstpointer data)
++{
++  g_autoptr(GError) error = NULL;
++  gboolean match = FALSE;
++  (void) data;
++  mock.stale_captures = 1;
++  mock.transient_error_at = 2;
++  g_assert_true (verify (fixture, &match, &error));
++  g_assert_no_error (error);
++  g_assert_true (match);
++  g_assert_cmpint (mock.opened, ==, 3);
++  g_assert_cmpint (mock.freed, ==, 3);
++}
++
++static void
 +test_cancelled_match (Fixture *fixture, gconstpointer data)
 +{
 +  g_autoptr(GError) error = NULL;
@@ -1237,6 +1312,8 @@ index 00000000..34f565f3
 +  ADD_TEST ("verify/matching-error", test_matching_error);
 +  ADD_TEST ("verify/open-error", test_engine_open_error);
 +  ADD_TEST ("verify/error-recovery", test_capture_error_recovery);
++  ADD_TEST ("verify/sleep-reopen", test_sleep_reopens_engine);
++  ADD_TEST ("verify/sleep-retry-capture", test_sleep_retries_initial_capture);
 +  ADD_TEST ("verify/cancel-match", test_cancelled_match);
 +  ADD_TEST ("verify/cancel-waiting", test_cancel_waiting);
 +  ADD_TEST ("verify/cancel-capture", test_cancel_capture);

@@ -24,6 +24,7 @@ Sil6250Engine *sil6250_engine_new(const char *path);
 void sil6250_engine_free(Sil6250Engine *engine);
 bool sil6250_engine_set_control(Sil6250Engine *engine, uint32_t timeout_ms,
                                 Sil6250Cancelled cancelled, void *user_data);
+#define SIL6250_CAPTURE_STALE -2
 int32_t sil6250_engine_capture(Sil6250Engine *engine, uint32_t timeout_ms,
                                uint8_t *raw, size_t raw_len);
 bool sil6250_engine_wait_lift(Sil6250Engine *engine, uint32_t timeout_ms);

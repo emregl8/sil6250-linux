@@ -919,7 +919,7 @@ impl Engine {
         }
         let deadline = Instant::now() + HANDSHAKE_TIMEOUT;
         self.attempts.clear();
-        match self.psk_mode {
+        let result = match self.psk_mode {
             PskMode::Legacy => self.legacy_handshake(deadline),
             PskMode::Provision => self.session_handshake(&KeyPlan::provision()?, deadline),
             PskMode::Replay => self.session_handshake(&KeyPlan::replay(), deadline),
@@ -931,7 +931,7 @@ impl Engine {
                         Err(e) => Err(e),
                     };
                     if provisioned.is_ok() {
-                        return Ok(());
+                        return self.shared.dev.check_control();
                     }
                     // No ack means this firmware does not take cmd 0x27 (or
                     // choked on it): don't offer it again on this engine. An
@@ -949,7 +949,9 @@ impl Engine {
                 }
                 self.legacy_handshake(deadline)
             }
-        }
+        };
+        self.shared.dev.check_control()?;
+        result
     }
 
     /// Drop any session and run the prelude + TLS handshake now, without

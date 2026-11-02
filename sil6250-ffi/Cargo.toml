@@ -13,5 +13,6 @@ crate-type = ["cdylib", "rlib"]
 fuzzing = []
 
 [dependencies]
+libc = "0.2"
 zeroize = "1.9"
 sil6250 = { path = "../sil6250" }

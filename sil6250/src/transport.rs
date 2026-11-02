@@ -4,7 +4,7 @@
 use std::fs::{File, OpenOptions};
 use std::num::NonZeroUsize;
 use std::os::unix::io::AsRawFd;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
 
 use nix::sys::mman::{mmap, munmap, MapFlags, ProtFlags};
@@ -46,6 +46,27 @@ pub const PETAIC_XFER_NO_IRQ: u32 = 1 << 1;
 const NOTIFY_HIGH_MS: u64 = 10;
 const READ_POST_MS: u64 = 20;
 const WAIT_IRQ_DEFAULT_MS: u32 = 500;
+const SLEEP_THRESHOLD: Duration = Duration::from_millis(100);
+
+fn sleep_offset() -> std::io::Result<Duration> {
+    fn read(clock: nix::libc::clockid_t) -> std::io::Result<Duration> {
+        let mut ts = nix::libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        if unsafe { nix::libc::clock_gettime(clock, &mut ts) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32))
+    }
+    let monotonic = read(nix::libc::CLOCK_MONOTONIC)?;
+    let boottime = read(nix::libc::CLOCK_BOOTTIME)?;
+    Ok(boottime.saturating_sub(monotonic))
+}
+
+fn slept_since(opened: Duration, current: Duration) -> bool {
+    current.saturating_sub(opened) > SLEEP_THRESHOLD
+}
 
 fn is_psk_frame(frame: &[u8]) -> bool {
     matches!(frame.first(), Some(0xf0)) && frame.get(9) == Some(&PETAIT_CMD_SET_PSK)
@@ -60,6 +81,7 @@ pub struct PetaicDev {
     pub window_size: usize,
     seq: u8,
     control: OperationControl,
+    opened_offset: Duration,
     pub verbose: bool,
     /// With `verbose`: dump whole frames instead of the first 32 bytes.
     /// Diagnostic tools only; far too noisy for the daemon's journal.
@@ -72,6 +94,7 @@ unsafe impl Send for PetaicDev {}
 impl PetaicDev {
     pub fn open(path: &str) -> std::io::Result<Self> {
         let file = OpenOptions::new().read(true).write(true).open(path)?;
+        let opened_offset = sleep_offset()?;
         let fd = file.as_raw_fd();
 
         let sz = unsafe {
@@ -99,7 +122,16 @@ impl PetaicDev {
         let window = std::ptr::NonNull::new(window.as_ptr() as *mut u8)
             .ok_or_else(|| std::io::Error::from_raw_os_error(nix::libc::EINVAL))?;
 
-        Ok(PetaicDev { file, window, window_size: size, seq: 0, control: OperationControl::default(), verbose: false, dump_full: false })
+        Ok(PetaicDev {
+            file,
+            window,
+            window_size: size,
+            seq: 0,
+            control: OperationControl::default(),
+            opened_offset,
+            verbose: false,
+            dump_full: false,
+        })
     }
 
     pub fn set_control(&mut self, control: OperationControl) {
@@ -107,11 +139,24 @@ impl PetaicDev {
     }
 
     pub fn check_control(&self) -> std::io::Result<()> {
-        self.control.check()
+        self.control.check()?;
+        if slept_since(self.opened_offset, sleep_offset()?) {
+            return Err(std::io::Error::from_raw_os_error(nix::libc::ESTALE));
+        }
+        Ok(())
     }
 
     pub fn pause(&self, duration: Duration) -> std::io::Result<()> {
-        self.control.sleep(duration)
+        let end = Instant::now() + duration;
+        loop {
+            self.check_control()?;
+            let remaining = end.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Ok(());
+            }
+            self.control
+                .sleep(remaining.min(Duration::from_millis(50)))?;
+        }
     }
 
     fn set_gpio(&self, line: u32, value: u32) -> std::io::Result<()> {
@@ -147,15 +192,27 @@ impl PetaicDev {
     }
 
     pub fn wait_irq(&self, timeout_ms: u32) -> std::io::Result<()> {
-        let timeout = if timeout_ms == 0 { WAIT_IRQ_DEFAULT_MS } else { timeout_ms };
-        self.control.wait_irq(Duration::from_millis(timeout as u64), |timeout_ms| {
-            let w = SilWaitIrq { timeout_ms, _pad: 0 };
-            unsafe {
-                sil6250_wait_irq_raw(self.file.as_raw_fd(), &w)
-                    .map_err(|e| std::io::Error::from_raw_os_error(e as i32))?;
-            }
-            Ok(())
-        })
+        let timeout = if timeout_ms == 0 {
+            WAIT_IRQ_DEFAULT_MS
+        } else {
+            timeout_ms
+        };
+        self.check_control()?;
+        self.control
+            .wait_irq(Duration::from_millis(timeout as u64), |timeout_ms| {
+                self.check_control()?;
+                let w = SilWaitIrq {
+                    timeout_ms,
+                    _pad: 0,
+                };
+                let result = unsafe {
+                    sil6250_wait_irq_raw(self.file.as_raw_fd(), &w)
+                        .map(|_| ())
+                        .map_err(|e| std::io::Error::from_raw_os_error(e as i32))
+                };
+                self.check_control()?;
+                result
+            })
     }
 
     /// Qword-aligned write into the TX region (+0x000).
@@ -382,6 +439,24 @@ impl Drop for PetaicDev {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sleep_offset_changes_only_after_threshold() {
+        let baseline = Duration::from_secs(4);
+        assert!(!slept_since(baseline, baseline));
+        assert!(!slept_since(baseline, baseline + SLEEP_THRESHOLD));
+        assert!(slept_since(
+            baseline,
+            baseline + SLEEP_THRESHOLD + Duration::from_millis(1)
+        ));
+    }
+
+    #[test]
+    fn sleep_offset_is_stable_while_awake() {
+        let baseline = sleep_offset().unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(!slept_since(baseline, sleep_offset().unwrap()));
+    }
 
     #[test]
     fn provisioning_frames_are_redacted_in_both_directions() {

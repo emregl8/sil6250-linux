@@ -89,6 +89,7 @@ unsafe extern "C" fn sil6250_engine_capture(
             1
         }
         Err(e) if e.kind() == std::io::ErrorKind::TimedOut => 0,
+        Err(e) if e.raw_os_error() == Some(libc::ESTALE) => -2,
         Err(_) => -1,
     }
 }

@@ -150,6 +150,7 @@ dependencies = [
 name = "sil6250-ffi"
 version = "0.3.0"
 dependencies = [
+ "libc",
  "sil6250",
  "zeroize",
 ]
